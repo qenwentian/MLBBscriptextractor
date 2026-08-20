@@ -44,7 +44,7 @@ data class SkinPackage(
         get() = formatByteSize(totalSize)
 
     val hasValidAssets: Boolean
-        get() = totalFiles > 0
+        get() = artFiles.isNotEmpty() || audioFiles.isNotEmpty() || uiFiles.isNotEmpty() || otherFiles.isNotEmpty()
 }
 
 enum class OverwriteMode(val title: String, val description: String) {

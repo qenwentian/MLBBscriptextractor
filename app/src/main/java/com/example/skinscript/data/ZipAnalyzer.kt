@@ -14,7 +14,6 @@ class ZipAnalyzer(private val context: Context) {
 
     companion object {
         private const val TAG = "ZipAnalyzer"
-        private const val ASSETS_SEGMENT = "assets/"
     }
 
     suspend fun analyze(uri: Uri): Result<SkinPackage> = withContext(Dispatchers.IO) {
@@ -26,7 +25,6 @@ class ZipAnalyzer(private val context: Context) {
             val artList = mutableListOf<ZipEntryInfo>()
             val audioList = mutableListOf<ZipEntryInfo>()
             val uiList = mutableListOf<ZipEntryInfo>()
-            val otherList = mutableListOf<ZipEntryInfo>()
 
             BufferedInputStream(inputStream).use { bis ->
                 ZipInputStream(bis).use { zis ->
@@ -44,7 +42,7 @@ class ZipAnalyzer(private val context: Context) {
                                         AssetCategory.ART -> artList.add(entryInfo)
                                         AssetCategory.AUDIO -> audioList.add(entryInfo)
                                         AssetCategory.UI -> uiList.add(entryInfo)
-                                        AssetCategory.OTHER -> otherList.add(entryInfo)
+                                        AssetCategory.OTHER -> Unit // Explicitly ignore non-target assets
                                     }
                                 }
                             }
@@ -63,51 +61,66 @@ class ZipAnalyzer(private val context: Context) {
                 artFiles = artList,
                 audioFiles = audioList,
                 uiFiles = uiList,
-                otherFiles = otherList
+                otherFiles = emptyList()
             )
         }
     }
 
     private fun categorizeEntry(entry: ZipEntry, normalizedPath: String): ZipEntryInfo? {
         val filename = normalizedPath.substringAfterLast('/')
+        if (filename.isBlank()) return null
 
-        // 1. Check if the entry is nested under an assets/ directory (case-insensitive)
-        val assetsMatch = Regex("^assets/", RegexOption.IGNORE_CASE).find(normalizedPath)
-        val pathWithoutAssets = if (assetsMatch != null) {
-            normalizedPath.substring(assetsMatch.range.last + 1).trimStart('/')
-        } else {
-            normalizedPath
+        val pathUnderAssets: String
+        val lowerPath = normalizedPath.lowercase()
+
+        // 1. Locate the position of "/assets/" or "^assets/"
+        val assetsIdx = when {
+            lowerPath.contains("/assets/") -> lowerPath.lastIndexOf("/assets/") + "/assets/".length
+            lowerPath.startsWith("assets/") -> "assets/".length
+            else -> -1
         }
 
-        // 2. Identify category case-insensitively
-        val category = when {
-            pathWithoutAssets.startsWith("art/", ignoreCase = true) || pathWithoutAssets.equals("art", ignoreCase = true) -> AssetCategory.ART
-            pathWithoutAssets.startsWith("audio/", ignoreCase = true) || pathWithoutAssets.equals("audio", ignoreCase = true) -> AssetCategory.AUDIO
-            pathWithoutAssets.startsWith("ui/", ignoreCase = true) || pathWithoutAssets.equals("ui", ignoreCase = true) -> AssetCategory.UI
-            assetsMatch != null -> AssetCategory.OTHER
-            else -> null
-        } ?: return null
+        if (assetsIdx != -1) {
+            pathUnderAssets = normalizedPath.substring(assetsIdx).trimStart('/')
+        } else {
+            // 2. Locate direct "Art/", "Audio/", or "UI/" root folders anywhere in the archive path
+            val directIdx = listOf("art/", "audio/", "ui/").map {
+                when {
+                    lowerPath.contains("/$it") -> lowerPath.lastIndexOf("/$it") + 1
+                    lowerPath.startsWith(it) -> 0
+                    else -> -1
+                }
+            }.filter { it != -1 }.maxOrNull() ?: -1
 
-        // 3. Reconstruct the relative path using the exact in-game folder casing (Art, Audio, UI)
-        val canonicalRelativePath = when (category) {
-            AssetCategory.ART -> {
-                val subPath = pathWithoutAssets.substringAfter('/', "").ifEmpty { filename }
-                if (subPath == filename && !pathWithoutAssets.contains('/')) "Art/$filename" else "Art/$subPath"
+            if (directIdx != -1) {
+                pathUnderAssets = normalizedPath.substring(directIdx).trimStart('/')
+            } else {
+                return null
             }
-            AssetCategory.AUDIO -> {
-                val subPath = pathWithoutAssets.substringAfter('/', "").ifEmpty { filename }
-                if (subPath == filename && !pathWithoutAssets.contains('/')) "Audio/$filename" else "Audio/$subPath"
+        }
+
+        if (pathUnderAssets.isBlank()) return null
+
+        val firstFolder = pathUnderAssets.substringBefore('/')
+        val remainder = pathUnderAssets.substringAfter('/', "")
+
+        // 3. Keep ONLY Art, Audio, and UI — filter out AstclnPack or any other folder
+        val (category, canonicalPath) = when {
+            firstFolder.equals("art", ignoreCase = true) -> {
+                AssetCategory.ART to if (remainder.isEmpty()) "Art/$filename" else "Art/$remainder"
             }
-            AssetCategory.UI -> {
-                val subPath = pathWithoutAssets.substringAfter('/', "").ifEmpty { filename }
-                if (subPath == filename && !pathWithoutAssets.contains('/')) "UI/$filename" else "UI/$subPath"
+            firstFolder.equals("audio", ignoreCase = true) -> {
+                AssetCategory.AUDIO to if (remainder.isEmpty()) "Audio/$filename" else "Audio/$remainder"
             }
-            AssetCategory.OTHER -> pathWithoutAssets
+            firstFolder.equals("ui", ignoreCase = true) -> {
+                AssetCategory.UI to if (remainder.isEmpty()) "UI/$filename" else "UI/$remainder"
+            }
+            else -> return null // Discards AstclnPack and other folders
         }
 
         return ZipEntryInfo(
             entryPath = entry.name,
-            relativeAssetPath = canonicalRelativePath,
+            relativeAssetPath = canonicalPath,
             category = category,
             name = filename,
             size = if (entry.size >= 0) entry.size else 0L,
@@ -116,30 +129,14 @@ class ZipAnalyzer(private val context: Context) {
         )
     }
 
-    /**
-     * Zip Slip and Path Traversal Protection
-     * Validates that the entry path does not contain directory traversal sequences
-     * or absolute filesystem paths.
-     */
     fun isValidZipPath(rawPath: String): Boolean {
-        if (rawPath.isBlank()) return false
-        if (rawPath.contains('\u0000')) return false
-
+        if (rawPath.isBlank() || rawPath.contains('\u0000')) return false
         val normalized = rawPath.replace('\\', '/')
         val segments = normalized.split('/')
-
         for (segment in segments) {
-            if (segment == "..") {
-                return false
-            }
+            if (segment == "..") return false
         }
-
-        // Reject absolute paths
-        if (normalized.startsWith("/") || (rawPath.length > 1 && rawPath[1] == ':')) {
-            return false
-        }
-
-        return true
+        return !(normalized.startsWith("/") || (rawPath.length > 1 && rawPath[1] == ':'))
     }
 
     fun normalizePath(path: String): String {
@@ -149,9 +146,7 @@ class ZipAnalyzer(private val context: Context) {
     }
 
     private fun queryDisplayName(uri: Uri): String? {
-        if (uri.scheme == "file") {
-            return uri.lastPathSegment
-        }
+        if (uri.scheme == "file") return uri.lastPathSegment
         return runCatching {
             context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
                 if (cursor.moveToFirst()) {
