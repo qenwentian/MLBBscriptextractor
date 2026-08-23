@@ -10,15 +10,28 @@ import java.io.BufferedInputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 
+import android.os.ParcelFileDescriptor
+import java.io.File
+import java.util.zip.ZipFile
+
 class ZipAnalyzer(private val context: Context) {
 
     companion object {
         private const val TAG = "ZipAnalyzer"
+        private const val BUFFER_SIZE = 128 * 1024
     }
 
     suspend fun analyze(uri: Uri): Result<SkinPackage> = withContext(Dispatchers.IO) {
         runCatching {
             val displayName = queryDisplayName(uri) ?: "skin_package.zip"
+
+            // 1. Fast-path: try random-access ZipFile via ParcelFileDescriptor or file path
+            val fastResult = tryAnalyzeWithZipFile(uri, displayName)
+            if (fastResult != null) {
+                return@runCatching fastResult
+            }
+
+            // 2. Fallback: streaming ZipInputStream with 128KB buffer
             val inputStream = context.contentResolver.openInputStream(uri)
                 ?: throw IllegalArgumentException("Cannot open stream for URI: $uri")
 
@@ -26,7 +39,7 @@ class ZipAnalyzer(private val context: Context) {
             val audioList = mutableListOf<ZipEntryInfo>()
             val uiList = mutableListOf<ZipEntryInfo>()
 
-            BufferedInputStream(inputStream).use { bis ->
+            BufferedInputStream(inputStream, BUFFER_SIZE).use { bis ->
                 ZipInputStream(bis).use { zis ->
                     var entry: ZipEntry? = zis.nextEntry
                     while (entry != null) {
@@ -42,7 +55,7 @@ class ZipAnalyzer(private val context: Context) {
                                         AssetCategory.ART -> artList.add(entryInfo)
                                         AssetCategory.AUDIO -> audioList.add(entryInfo)
                                         AssetCategory.UI -> uiList.add(entryInfo)
-                                        AssetCategory.OTHER -> Unit // Explicitly ignore non-target assets
+                                        AssetCategory.OTHER -> Unit
                                     }
                                 }
                             }
@@ -56,6 +69,72 @@ class ZipAnalyzer(private val context: Context) {
             }
 
             SkinPackage(
+                sourceUri = uri,
+                displayName = displayName,
+                artFiles = artList,
+                audioFiles = audioList,
+                uiFiles = uiList,
+                otherFiles = emptyList()
+            )
+        }
+    }
+
+    private fun tryAnalyzeWithZipFile(uri: Uri, displayName: String): SkinPackage? {
+        return try {
+            if (uri.scheme == "file" && uri.path != null) {
+                val file = File(uri.path!!)
+                if (file.exists() && file.canRead()) {
+                    return parseZipFileEntries(ZipFile(file), uri, displayName)
+                }
+            }
+
+            val pfd: ParcelFileDescriptor? = context.contentResolver.openFileDescriptor(uri, "r")
+            if (pfd != null) {
+                pfd.use {
+                    val procFile = File("/proc/self/fd/${pfd.fd}")
+                    val zipFile = ZipFile(procFile)
+                    parseZipFileEntries(zipFile, uri, displayName)
+                }
+            } else {
+                null
+            }
+        } catch (e: Throwable) {
+            Log.d(TAG, "ZipFile fast-path unavailable, falling back to ZipInputStream: ${e.message}")
+            null
+        }
+    }
+
+    private fun parseZipFileEntries(zipFile: ZipFile, uri: Uri, displayName: String): SkinPackage {
+        zipFile.use { zf ->
+            val artList = mutableListOf<ZipEntryInfo>()
+            val audioList = mutableListOf<ZipEntryInfo>()
+            val uiList = mutableListOf<ZipEntryInfo>()
+
+            val entries = zf.entries()
+            while (entries.hasMoreElements()) {
+                val entry = entries.nextElement()
+                val entryName = entry.name
+                if (isValidZipPath(entryName)) {
+                    val normalizedPath = normalizePath(entryName)
+                    val isDirectory = entry.isDirectory || normalizedPath.endsWith("/")
+
+                    if (!isDirectory) {
+                        val entryInfo = categorizeEntry(entry, normalizedPath)
+                        if (entryInfo != null) {
+                            when (entryInfo.category) {
+                                AssetCategory.ART -> artList.add(entryInfo)
+                                AssetCategory.AUDIO -> audioList.add(entryInfo)
+                                AssetCategory.UI -> uiList.add(entryInfo)
+                                AssetCategory.OTHER -> Unit
+                            }
+                        }
+                    }
+                } else {
+                    Log.w(TAG, "Rejected suspicious ZIP path: $entryName")
+                }
+            }
+
+            return SkinPackage(
                 sourceUri = uri,
                 displayName = displayName,
                 artFiles = artList,

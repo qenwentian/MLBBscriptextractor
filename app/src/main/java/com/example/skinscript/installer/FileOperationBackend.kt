@@ -9,4 +9,7 @@ interface FileOperationBackend {
     suspend fun isWritable(path: String): Boolean
     suspend fun delete(path: String): Boolean
     suspend fun copyFile(source: InputStream, destination: String): Boolean
+    suspend fun checkExistingFiles(paths: List<String>): Set<String>
+    suspend fun createDirectories(paths: List<String>): Boolean
+    fun createTarProcess(destination: String): Process?
 }
