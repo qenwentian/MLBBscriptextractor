@@ -9,6 +9,8 @@ import java.io.File
 import java.io.InputStream
 import java.lang.reflect.Method
 
+import java.util.concurrent.ConcurrentHashMap
+
 class ShizukuFileBackend : FileOperationBackend {
 
     companion object {
@@ -35,6 +37,8 @@ class ShizukuFileBackend : FileOperationBackend {
         }
     }
 
+    private val knownDirectories = ConcurrentHashMap.newKeySet<String>()
+
     override suspend fun exists(path: String): Boolean = withContext(Dispatchers.IO) {
         val escapedPath = escapeShellPath(path)
         val exitCode = executeCommand("test -e $escapedPath")
@@ -48,9 +52,103 @@ class ShizukuFileBackend : FileOperationBackend {
     }
 
     override suspend fun createDirectory(path: String): Boolean = withContext(Dispatchers.IO) {
-        val escapedPath = escapeShellPath(path)
+        val normalized = path.replace('\\', '/').trimEnd('/')
+        if (normalized.isEmpty() || knownDirectories.contains(normalized)) {
+            return@withContext true
+        }
+
+        val escapedPath = escapeShellPath(normalized)
         val exitCode = executeCommand("mkdir -p $escapedPath")
-        exitCode == 0
+        if (exitCode == 0) {
+            markDirectoryKnown(normalized)
+            true
+        } else {
+            false
+        }
+    }
+
+    override suspend fun createDirectories(paths: List<String>): Boolean = withContext(Dispatchers.IO) {
+        val toCreate = paths
+            .map { it.replace('\\', '/').trimEnd('/') }
+            .filter { it.isNotEmpty() && !knownDirectories.contains(it) }
+            .distinct()
+
+        if (toCreate.isEmpty()) return@withContext true
+
+        try {
+            val process = createProcess(arrayOf("sh", "-c", "while IFS= read -r d; do [ -n \"\$d\" ] && mkdir -p \"\$d\"; done"))
+            process.outputStream.bufferedWriter().use { writer ->
+                for (dir in toCreate) {
+                    writer.write(dir)
+                    writer.write("\n")
+                }
+                writer.flush()
+            }
+            val exitCode = process.waitFor()
+            if (exitCode == 0) {
+                toCreate.forEach { markDirectoryKnown(it) }
+                true
+            } else {
+                Log.e(TAG, "Failed to batch create directories, exit code $exitCode")
+                false
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "Exception during batch createDirectories", e)
+            false
+        }
+    }
+
+    override suspend fun checkExistingFiles(paths: List<String>): Set<String> = withContext(Dispatchers.IO) {
+        if (paths.isEmpty()) return@withContext emptySet()
+
+        try {
+            val process = createProcess(
+                arrayOf("sh", "-c", "while IFS= read -r f; do [ -e \"\$f\" ] && printf \"%s\\n\" \"\$f\"; done")
+            )
+
+            // Write all candidate paths to process stdin in background thread
+            val writerThread = Thread {
+                try {
+                    process.outputStream.bufferedWriter().use { writer ->
+                        for (path in paths) {
+                            writer.write(path)
+                            writer.write("\n")
+                        }
+                        writer.flush()
+                    }
+                } catch (e: Throwable) {
+                    Log.d(TAG, "Writer thread finished or closed: ${e.message}")
+                }
+            }.apply { start() }
+
+            // Read matched paths from process stdout
+            val existing = mutableSetOf<String>()
+            process.inputStream.bufferedReader().useLines { lines ->
+                lines.forEach { line ->
+                    if (line.isNotBlank()) {
+                        existing.add(line.trim())
+                    }
+                }
+            }
+
+            writerThread.join()
+            process.waitFor()
+            existing
+        } catch (e: Throwable) {
+            Log.e(TAG, "Error checking existing files in batch", e)
+            // Fallback to empty if failed
+            emptySet()
+        }
+    }
+
+    override fun createTarProcess(destination: String): Process? {
+        return try {
+            val escapedDest = escapeShellPath(destination)
+            createProcess(arrayOf("sh", "-c", "tar -xf - -C $escapedDest"))
+        } catch (e: Throwable) {
+            Log.e(TAG, "Failed to create TAR process for $destination", e)
+            null
+        }
     }
 
     override suspend fun isWritable(path: String): Boolean = withContext(Dispatchers.IO) {
@@ -81,7 +179,7 @@ class ShizukuFileBackend : FileOperationBackend {
                 val process = createProcess(arrayOf("sh", "-c", "cat > $escapedDest"))
 
                 process.outputStream.use { outStream ->
-                    val buffer = ByteArray(32 * 1024)
+                    val buffer = ByteArray(64 * 1024)
                     var bytesRead: Int
                     while (source.read(buffer).also { bytesRead = it } != -1) {
                         outStream.write(buffer, 0, bytesRead)
@@ -102,6 +200,14 @@ class ShizukuFileBackend : FileOperationBackend {
                 false
             }
         }
+
+    private fun markDirectoryKnown(dir: String) {
+        var current: String? = dir
+        while (current != null && current.isNotEmpty() && current != "/") {
+            knownDirectories.add(current)
+            current = File(current).parent?.replace('\\', '/')
+        }
+    }
 
     private fun executeCommand(command: String): Int {
         return try {
