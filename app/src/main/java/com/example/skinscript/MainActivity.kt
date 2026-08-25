@@ -30,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
@@ -41,9 +42,13 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Storefront
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Widgets
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -57,6 +62,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
@@ -88,15 +95,25 @@ import com.example.skinscript.data.AssetCategory
 import com.example.skinscript.data.InstallSummary
 import com.example.skinscript.data.OverwriteMode
 import com.example.skinscript.data.SkinPackage
+import com.example.skinscript.data.updater.UpdateCheckState
 import com.example.skinscript.installer.OverwriteDecision
 import com.example.skinscript.shizuku.ShizukuState
 import com.example.skinscript.ui.OverwritePromptData
 import com.example.skinscript.ui.SkinInstallerViewModel
+import com.example.skinscript.ui.marketplace.MarketplaceScreen
+import com.example.skinscript.ui.marketplace.MarketplaceViewModel
 import com.example.skinscript.ui.theme.SkinScriptTheme
+import com.example.skinscript.ui.updater.AppUpdateDialog
+
+enum class MainTab(val title: String, val icon: ImageVector) {
+    INSTALLER("Installer", Icons.Default.FolderZip),
+    MARKETPLACE("Marketplace", Icons.Default.Storefront)
+}
 
 class MainActivity : ComponentActivity() {
 
     private val viewModel: SkinInstallerViewModel by viewModels()
+    private val marketplaceViewModel: MarketplaceViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -108,6 +125,7 @@ class MainActivity : ComponentActivity() {
             SkinScriptTheme {
                 SkinInstallerApp(
                     viewModel = viewModel,
+                    marketplaceViewModel = marketplaceViewModel,
                     onOpenZipPicker = { uri -> viewModel.loadZip(uri) }
                 )
             }
@@ -151,9 +169,12 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun SkinInstallerApp(
     viewModel: SkinInstallerViewModel,
+    marketplaceViewModel: MarketplaceViewModel,
     onOpenZipPicker: (Uri) -> Unit
 ) {
     val context = LocalContext.current
+    var selectedTab by remember { mutableStateOf(MainTab.INSTALLER) }
+
     val shizukuState by viewModel.shizukuState.collectAsState()
     val destinationPath by viewModel.destinationPath.collectAsState()
     val overwriteMode by viewModel.overwriteMode.collectAsState()
@@ -166,6 +187,11 @@ fun SkinInstallerApp(
     val testAccessResult by viewModel.testAccessResult.collectAsState()
     val isTestingAccess by viewModel.isTestingAccess.collectAsState()
     val overwritePrompt by viewModel.overwritePrompt.collectAsState()
+
+    // Auto updater state
+    val updateCheckState by marketplaceViewModel.updateCheckState.collectAsState()
+    val updateDownloadState by marketplaceViewModel.updateDownloadState.collectAsState()
+    var showManualUpdatePrompt by remember { mutableStateOf(false) }
 
     var showDestinationDialog by remember { mutableStateOf(false) }
     var showOverwriteDialog by remember { mutableStateOf(false) }
@@ -192,24 +218,46 @@ fun SkinInstallerApp(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
-                            imageVector = Icons.Default.FolderZip,
+                            imageVector = if (selectedTab == MainTab.INSTALLER) Icons.Default.FolderZip else Icons.Default.Storefront,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(26.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "SkinScript",
+                            text = if (selectedTab == MainTab.INSTALLER) "SkinScript" else "Skin Marketplace",
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold
                         )
                     }
                 },
                 actions = {
-                    IconButton(onClick = { viewModel.refreshShizuku() }) {
+                    // Update notification action
+                    if (updateCheckState is UpdateCheckState.UpdateAvailable) {
+                        IconButton(onClick = { showManualUpdatePrompt = true }) {
+                            BadgedBox(badge = { Badge { Text("1") } }) {
+                                Icon(
+                                    imageVector = Icons.Default.SystemUpdate,
+                                    contentDescription = "Update Available",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                    }
+
+                    // Refresh Action
+                    IconButton(
+                        onClick = {
+                            if (selectedTab == MainTab.INSTALLER) {
+                                viewModel.refreshShizuku()
+                            } else {
+                                marketplaceViewModel.loadInitialPage()
+                            }
+                        }
+                    ) {
                         Icon(
                             imageVector = Icons.Default.Refresh,
-                            contentDescription = "Refresh Status"
+                            contentDescription = "Refresh"
                         )
                     }
                 },
@@ -217,63 +265,117 @@ fun SkinInstallerApp(
                     containerColor = MaterialTheme.colorScheme.surface
                 )
             )
+        },
+        bottomBar = {
+            NavigationBar(
+                containerColor = MaterialTheme.colorScheme.surface
+            ) {
+                MainTab.entries.forEach { tab ->
+                    NavigationBarItem(
+                        selected = selectedTab == tab,
+                        onClick = { selectedTab = tab },
+                        icon = {
+                            Icon(imageVector = tab.icon, contentDescription = tab.title)
+                        },
+                        label = { Text(tab.title, fontWeight = if (selectedTab == tab) FontWeight.Bold else FontWeight.Normal) }
+                    )
+                }
+            }
         }
     ) { innerPadding ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // 1. Shizuku Status Card
-            ShizukuStatusCard(
-                state = shizukuState,
-                onRequestPermission = { viewModel.requestShizukuPermission() },
-                onRefresh = { viewModel.refreshShizuku() }
-            )
-
-            // 2. Destination Settings Card
-            DestinationSettingsCard(
-                destinationPath = destinationPath,
-                overwriteMode = overwriteMode,
-                testAccessResult = testAccessResult,
-                isTestingAccess = isTestingAccess,
-                isShizukuReady = shizukuState.isReady,
-                onEditDestination = { showDestinationDialog = true },
-                onEditOverwriteMode = { showOverwriteDialog = true },
-                onTestAccess = { viewModel.testDestinationAccess() }
-            )
-
-            // 3. ZIP Package Analysis Card
-            ZipPackageCard(
-                skinPackage = skinPackage,
-                isAnalyzing = isAnalyzing,
-                analysisError = analysisError,
-                onOpenZip = {
-                    zipPickerLauncher.launch(
-                        arrayOf(
-                            "application/zip",
-                            "application/x-zip-compressed",
-                            "application/octet-stream",
-                            "*/*"
+            when (selectedTab) {
+                MainTab.INSTALLER -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        // 1. Shizuku Status Card
+                        ShizukuStatusCard(
+                            state = shizukuState,
+                            onRequestPermission = { viewModel.requestShizukuPermission() },
+                            onRefresh = { viewModel.refreshShizuku() }
                         )
+
+                        // 2. Destination Settings Card
+                        DestinationSettingsCard(
+                            destinationPath = destinationPath,
+                            overwriteMode = overwriteMode,
+                            testAccessResult = testAccessResult,
+                            isTestingAccess = isTestingAccess,
+                            isShizukuReady = shizukuState.isReady,
+                            onEditDestination = { showDestinationDialog = true },
+                            onEditOverwriteMode = { showOverwriteDialog = true },
+                            onTestAccess = { viewModel.testDestinationAccess() }
+                        )
+
+                        // 3. ZIP Package Analysis Card
+                        ZipPackageCard(
+                            skinPackage = skinPackage,
+                            isAnalyzing = isAnalyzing,
+                            analysisError = analysisError,
+                            onOpenZip = {
+                                zipPickerLauncher.launch(
+                                    arrayOf(
+                                        "application/zip",
+                                        "application/x-zip-compressed",
+                                        "application/octet-stream",
+                                        "*/*"
+                                    )
+                                )
+                            },
+                            onDismissError = { viewModel.dismissError() }
+                        )
+
+                        // 4. Installation Action & Progress Card
+                        InstallActionCard(
+                            skinPackage = skinPackage,
+                            isShizukuReady = shizukuState.isReady,
+                            isInstalling = isInstalling,
+                            installProgress = installProgress,
+                            onInstall = { viewModel.startInstall() }
+                        )
+
+                        Spacer(modifier = Modifier.height(16.dp))
+                    }
+                }
+
+                MainTab.MARKETPLACE -> {
+                    MarketplaceScreen(
+                        viewModel = marketplaceViewModel,
+                        onInstallZip = { uri ->
+                            viewModel.loadZip(uri)
+                            selectedTab = MainTab.INSTALLER
+                            Toast.makeText(context, "Skin package loaded! Ready to install.", Toast.LENGTH_SHORT).show()
+                        }
                     )
+                }
+            }
+        }
+    }
+
+    // Auto update dialog
+    if (showManualUpdatePrompt || updateCheckState is UpdateCheckState.UpdateAvailable) {
+        val info = (updateCheckState as? UpdateCheckState.UpdateAvailable)?.info
+        if (info != null) {
+            AppUpdateDialog(
+                info = info,
+                downloadState = updateDownloadState,
+                onConfirmUpdate = {
+                    marketplaceViewModel.downloadAndInstallUpdate(info)
                 },
-                onDismissError = { viewModel.dismissError() }
+                onDismiss = {
+                    showManualUpdatePrompt = false
+                    marketplaceViewModel.dismissUpdateDialog()
+                }
             )
-
-            // 4. Installation Action & Progress Card
-            InstallActionCard(
-                skinPackage = skinPackage,
-                isShizukuReady = shizukuState.isReady,
-                isInstalling = isInstalling,
-                installProgress = installProgress,
-                onInstall = { viewModel.startInstall() }
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
         }
     }
 

@@ -58,6 +58,8 @@ dependencies {
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.shizuku.api)
     implementation(libs.shizuku.provider)
+    implementation(libs.okhttp)
+    implementation(libs.jsoup)
 
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
