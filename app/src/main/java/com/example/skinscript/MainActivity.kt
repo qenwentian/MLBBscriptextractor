@@ -354,7 +354,8 @@ fun SkinInstallerApp(
                             viewModel.loadZip(uri)
                             selectedTab = MainTab.INSTALLER
                             Toast.makeText(context, "Skin package loaded! Ready to install.", Toast.LENGTH_SHORT).show()
-                        }
+                        },
+                        onOpenUpdate = { showManualUpdatePrompt = true }
                     )
                 }
             }
@@ -362,7 +363,7 @@ fun SkinInstallerApp(
     }
 
     // Auto update dialog
-    if (showManualUpdatePrompt || updateCheckState is UpdateCheckState.UpdateAvailable) {
+    if (showManualUpdatePrompt) {
         val info = (updateCheckState as? UpdateCheckState.UpdateAvailable)?.info
         if (info != null) {
             AppUpdateDialog(
@@ -373,7 +374,6 @@ fun SkinInstallerApp(
                 },
                 onDismiss = {
                     showManualUpdatePrompt = false
-                    marketplaceViewModel.dismissUpdateDialog()
                 }
             )
         }

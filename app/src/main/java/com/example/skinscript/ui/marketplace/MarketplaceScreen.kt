@@ -74,6 +74,7 @@ import com.example.skinscript.data.marketplace.MarketplaceItem
 fun MarketplaceScreen(
     viewModel: MarketplaceViewModel,
     onInstallZip: (Uri) -> Unit,
+    onOpenUpdate: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val searchQuery by viewModel.searchQuery.collectAsState()
@@ -84,6 +85,7 @@ fun MarketplaceScreen(
     val downloadStates by viewModel.downloadStates.collectAsState()
     val currentPage by viewModel.currentPage.collectAsState()
     val totalPages by viewModel.totalPages.collectAsState()
+    val updateCheckState by viewModel.updateCheckState.collectAsState()
 
     val items = viewModel.displayedItems
     val listState = rememberLazyListState()
@@ -114,6 +116,50 @@ fun MarketplaceScreen(
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
+        // Optional Update Available Banner
+        if (updateCheckState is com.example.skinscript.data.updater.UpdateCheckState.UpdateAvailable) {
+            val updateInfo = (updateCheckState as com.example.skinscript.data.updater.UpdateCheckState.UpdateAvailable).info
+            Surface(
+                color = MaterialTheme.colorScheme.primaryContainer,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth(),
+                onClick = onOpenUpdate
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.FolderZip,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "New Update Available: v${updateInfo.versionName}",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        Text(
+                            text = "Tap to review and install update",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                        )
+                    }
+                    Button(
+                        onClick = onOpenUpdate,
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        modifier = Modifier.height(32.dp)
+                    ) {
+                        Text("Update", fontSize = 12.sp)
+                    }
+                }
+            }
+        }
         // 1. Search Bar
         OutlinedTextField(
             value = searchQuery,
