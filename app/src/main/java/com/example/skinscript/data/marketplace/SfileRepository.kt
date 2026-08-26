@@ -5,6 +5,9 @@ import android.net.Uri
 import android.util.Log
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.Cookie
@@ -66,6 +69,13 @@ class SfileRepository(private val context: Context) {
         dir
     }
 
+    private val userRepoCache = ConcurrentHashMap<String, MarketplaceItem>()
+    private var totalCachedPages = 1
+
+    fun getCachedUserItems(): List<MarketplaceItem> {
+        return userRepoCache.values.toList()
+    }
+
     suspend fun fetchUserFiles(page: Int = 1): Result<MarketplacePage> = withContext(Dispatchers.IO) {
         try {
             val url = if (page <= 1) BASE_USER_URL else "$BASE_USER_URL?page=$page"
@@ -81,11 +91,49 @@ class SfileRepository(private val context: Context) {
                 }
                 val html = response.body?.string() ?: return@withContext Result.failure(Exception("Empty response body"))
                 val parsedPage = parseUserFilesHtml(html, page)
+                
+                // Cache items
+                for (item in parsedPage.items) {
+                    userRepoCache[item.id] = item
+                }
+                totalCachedPages = maxOf(totalCachedPages, parsedPage.totalPages)
+                
                 Result.success(parsedPage)
             }
         } catch (e: Throwable) {
             Log.e(TAG, "Error fetching user files page $page", e)
             Result.failure(e)
+        }
+    }
+
+    suspend fun indexAllUserPages(
+        onBatchLoaded: (List<MarketplaceItem>) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        try {
+            // First ensure page 1 is loaded to get total pages
+            val p1 = fetchUserFiles(1).getOrNull()
+            val total = p1?.totalPages ?: totalCachedPages
+            onBatchLoaded(userRepoCache.values.toList())
+
+            if (total <= 1) return@withContext
+
+            // Fetch remaining pages in concurrent chunks
+            val pagesToFetch = (2..total).toList()
+            val chunks = pagesToFetch.chunked(6)
+            for (chunk in chunks) {
+                coroutineScope {
+                    val deferreds = chunk.map { pageNum ->
+                        async {
+                            fetchUserFiles(pageNum)
+                        }
+                    }
+                    deferreds.awaitAll()
+                }
+                onBatchLoaded(userRepoCache.values.toList())
+            }
+            Log.d(TAG, "Completed indexing all $total pages. Total items: ${userRepoCache.size}")
+        } catch (e: Throwable) {
+            Log.e(TAG, "Error during full repo background indexing", e)
         }
     }
 

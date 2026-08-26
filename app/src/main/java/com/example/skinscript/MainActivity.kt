@@ -107,7 +107,7 @@ import com.example.skinscript.ui.updater.AppUpdateDialog
 
 enum class MainTab(val title: String, val icon: ImageVector) {
     INSTALLER("Installer", Icons.Default.FolderZip),
-    MARKETPLACE("Marketplace", Icons.Default.Storefront)
+    DATABASE("Skin DB", Icons.Default.CloudDownload)
 }
 
 class MainActivity : ComponentActivity() {
@@ -218,14 +218,14 @@ fun SkinInstallerApp(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
-                            imageVector = if (selectedTab == MainTab.INSTALLER) Icons.Default.FolderZip else Icons.Default.Storefront,
+                            imageVector = if (selectedTab == MainTab.INSTALLER) Icons.Default.FolderZip else Icons.Default.CloudDownload,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(26.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = if (selectedTab == MainTab.INSTALLER) "SkinScript" else "Skin Marketplace",
+                            text = if (selectedTab == MainTab.INSTALLER) "SkinScript" else "Skin Database",
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold
                         )
@@ -347,7 +347,7 @@ fun SkinInstallerApp(
                     }
                 }
 
-                MainTab.MARKETPLACE -> {
+                MainTab.DATABASE -> {
                     MarketplaceScreen(
                         viewModel = marketplaceViewModel,
                         onInstallZip = { uri ->
