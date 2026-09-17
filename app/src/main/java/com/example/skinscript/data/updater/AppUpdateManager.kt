@@ -48,6 +48,30 @@ class AppUpdateManager(private val context: Context) {
         const val DEFAULT_GITHUB_OWNER = "qenwentian"
         const val DEFAULT_GITHUB_REPO = "MLBBscriptextractor"
         private const val GITHUB_API_BASE = "https://api.github.com/repos"
+
+        fun isVersionNewer(latest: String, current: String, currentCode: Long = 0L): Boolean {
+            val cleanLatest = latest.trim().removePrefix("v").removePrefix("V").trim()
+            val cleanCurrent = current.trim().removePrefix("v").removePrefix("V").trim()
+            if (cleanLatest.isBlank() || cleanCurrent.isBlank()) return false
+
+            // If latest tag is a simple integer (e.g. "5" from "v5"), compare against versionCode too
+            val latestInt = cleanLatest.toLongOrNull()
+            if (latestInt != null && currentCode > 0L && currentCode >= latestInt) {
+                return false
+            }
+
+            val latestParts = cleanLatest.split(".").mapNotNull { it.toIntOrNull() }
+            val currentParts = cleanCurrent.split(".").mapNotNull { it.toIntOrNull() }
+
+            val length = maxOf(latestParts.size, currentParts.size)
+            for (i in 0 until length) {
+                val l = latestParts.getOrElse(i) { 0 }
+                val c = currentParts.getOrElse(i) { 0 }
+                if (l > c) return true
+                if (l < c) return false
+            }
+            return false
+        }
     }
 
     private val client: OkHttpClient = OkHttpClient.Builder()
@@ -67,6 +91,26 @@ class AppUpdateManager(private val context: Context) {
                 packageInfo.versionName ?: "1.0"
             } catch (_: Throwable) {
                 "1.0"
+            }
+        }
+
+    val currentVersionCode: Long
+        get() {
+            return try {
+                val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    context.packageManager.getPackageInfo(context.packageName, PackageManager.PackageInfoFlags.of(0))
+                } else {
+                    @Suppress("DEPRECATION")
+                    context.packageManager.getPackageInfo(context.packageName, 0)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    packageInfo.longVersionCode
+                } else {
+                    @Suppress("DEPRECATION")
+                    packageInfo.versionCode.toLong()
+                }
+            } catch (_: Throwable) {
+                1L
             }
         }
 
@@ -121,7 +165,7 @@ class AppUpdateManager(private val context: Context) {
                 }
 
                 val current = currentVersionName.removePrefix("v").trim()
-                val isNewer = isVersionNewer(tagName, current)
+                val isNewer = isVersionNewer(tagName, current, currentVersionCode)
 
                 if (isNewer) {
                     val updateInfo = AppUpdateInfo(
@@ -143,19 +187,24 @@ class AppUpdateManager(private val context: Context) {
         }
     }
 
-    private fun isVersionNewer(latest: String, current: String): Boolean {
-        if (latest.isBlank() || current.isBlank()) return false
-        val latestParts = latest.split(".").mapNotNull { it.toIntOrNull() }
-        val currentParts = current.split(".").mapNotNull { it.toIntOrNull() }
+    init {
+        cleanOldUpdates()
+    }
 
-        val length = maxOf(latestParts.size, currentParts.size)
-        for (i in 0 until length) {
-            val l = latestParts.getOrElse(i) { 0 }
-            val c = currentParts.getOrElse(i) { 0 }
-            if (l > c) return true
-            if (l < c) return false
+    fun cleanOldUpdates() {
+        try {
+            val updatesDir = File(context.getExternalFilesDir(null), "updates")
+            if (updatesDir.exists()) {
+                updatesDir.listFiles()?.forEach { file ->
+                    if (file.isFile && file.extension.equals("apk", ignoreCase = true)) {
+                        val deleted = file.delete()
+                        Log.d(TAG, "Cleaned up old update APK: ${file.name} ($deleted)")
+                    }
+                }
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "Error cleaning old updates", e)
         }
-        return false
     }
 
     suspend fun downloadApk(
@@ -164,7 +213,16 @@ class AppUpdateManager(private val context: Context) {
     ): Result<File> = withContext(Dispatchers.IO) {
         try {
             val targetDir = File(context.getExternalFilesDir(null), "updates")
-            if (!targetDir.exists()) targetDir.mkdirs()
+            if (targetDir.exists()) {
+                // Delete all previous update APKs to prevent storage pileup
+                targetDir.listFiles()?.forEach { file ->
+                    if (file.isFile && file.extension.equals("apk", ignoreCase = true)) {
+                        file.delete()
+                    }
+                }
+            } else {
+                targetDir.mkdirs()
+            }
 
             val targetFile = File(targetDir, updateInfo.apkFileName)
             if (targetFile.exists()) targetFile.delete()

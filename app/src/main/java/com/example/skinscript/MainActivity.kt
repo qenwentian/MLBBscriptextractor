@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -27,6 +28,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
@@ -57,7 +59,12 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
@@ -213,6 +220,9 @@ fun SkinInstallerApp(
         }
     }
 
+    val skinzipsList by viewModel.skinzipsList.collectAsState()
+    var showSkinZipsFolderDialog by remember { mutableStateOf(false) }
+
     var showDestinationDialog by remember { mutableStateOf(false) }
     var showOverwriteDialog by remember { mutableStateOf(false) }
 
@@ -231,6 +241,26 @@ fun SkinInstallerApp(
                 }
             }
             onOpenZipPicker(uris)
+        }
+    }
+
+    val importZipLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (!uris.isNullOrEmpty()) {
+            uris.forEach { uri ->
+                try {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (_: SecurityException) {
+                    // Not all providers support persistable permissions
+                }
+            }
+            viewModel.importZipsToSkinZips(uris) { count ->
+                Toast.makeText(context, "Imported $count ZIP file(s) into skinzips folder.", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -329,8 +359,22 @@ fun SkinInstallerApp(
                         // 2. Extracted Skins Backup & Re-extract Card
                         SavedSkinsCard(
                             savedSkinsCount = savedExtractedSkins.size,
+                            skinZipsCount = skinzipsList.size,
                             onReextractAll = { viewModel.reextractAllSkins() },
-                            onBrowseSkinZips = { viewModel.loadFromSkinZipsFolder() }
+                            onBrowseSkinZips = {
+                                viewModel.refreshSkinZips()
+                                showSkinZipsFolderDialog = true
+                            },
+                            onImportZips = {
+                                importZipLauncher.launch(
+                                    arrayOf(
+                                        "application/zip",
+                                        "application/x-zip-compressed",
+                                        "application/octet-stream",
+                                        "*/*"
+                                    )
+                                )
+                            }
                         )
 
                         // 3. Destination Settings Card
@@ -405,6 +449,7 @@ fun SkinInstallerApp(
                 },
                 onDismiss = {
                     showManualUpdatePrompt = false
+                    marketplaceViewModel.dismissUpdate()
                 }
             )
         }
@@ -461,13 +506,47 @@ fun SkinInstallerApp(
             onDismiss = { viewModel.dismissSummary() }
         )
     }
+
+    // SkinZips Folder Archive Viewer Dialog
+    if (showSkinZipsFolderDialog) {
+        SkinZipsFolderDialog(
+            directoryPath = viewModel.getSkinZipsDirectoryPath(),
+            files = skinzipsList,
+            onDismiss = { showSkinZipsFolderDialog = false },
+            onImportZips = {
+                importZipLauncher.launch(
+                    arrayOf(
+                        "application/zip",
+                        "application/x-zip-compressed",
+                        "application/octet-stream",
+                        "*/*"
+                    )
+                )
+            },
+            onDeleteFile = { file ->
+                viewModel.deleteSkinZip(file)
+            },
+            onLoadSelected = { selectedFiles ->
+                viewModel.loadSelectedSkinZips(selectedFiles)
+                showSkinZipsFolderDialog = false
+                Toast.makeText(context, "Loaded ${selectedFiles.size} package(s) into installer.", Toast.LENGTH_SHORT).show()
+            },
+            onLoadAll = {
+                viewModel.loadSelectedSkinZips(skinzipsList)
+                showSkinZipsFolderDialog = false
+                Toast.makeText(context, "Loaded ${skinzipsList.size} package(s) into installer.", Toast.LENGTH_SHORT).show()
+            }
+        )
+    }
 }
 
 @Composable
 fun SavedSkinsCard(
     savedSkinsCount: Int,
+    skinZipsCount: Int,
     onReextractAll: () -> Unit,
-    onBrowseSkinZips: () -> Unit
+    onBrowseSkinZips: () -> Unit,
+    onImportZips: () -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -498,7 +577,13 @@ fun SavedSkinsCard(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = if (savedSkinsCount > 0) "$savedSkinsCount skins registered for fast re-extraction" else "Stored in skinzips for instant restoration",
+                        text = if (savedSkinsCount > 0) {
+                            "$savedSkinsCount skins registered • $skinZipsCount in skinzips"
+                        } else if (skinZipsCount > 0) {
+                            "$skinZipsCount zip(s) found in skinzips folder"
+                        } else {
+                            "Stored in skinzips for instant restoration"
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -513,19 +598,28 @@ fun SavedSkinsCard(
                     onClick = onBrowseSkinZips,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(imageVector = Icons.Default.Folder, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(imageVector = Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("SkinZips Folder")
+                    Text(if (skinZipsCount > 0) "SkinZips ($skinZipsCount)" else "SkinZips Folder")
                 }
 
-                Button(
-                    onClick = onReextractAll,
+                OutlinedButton(
+                    onClick = onImportZips,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(imageVector = Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text(if (savedSkinsCount > 0) "Re-extract All ($savedSkinsCount)" else "Re-extract All")
+                    Text("Import ZIPs")
                 }
+            }
+
+            Button(
+                onClick = onReextractAll,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(imageVector = Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(if (savedSkinsCount > 0) "Re-extract All ($savedSkinsCount)" else "Re-extract All")
             }
         }
     }
@@ -1450,4 +1544,262 @@ fun InstallSummaryDialog(
             }
         }
     )
+}
+
+@Composable
+fun SkinZipsFolderDialog(
+    directoryPath: String,
+    files: List<File>,
+    onDismiss: () -> Unit,
+    onImportZips: () -> Unit,
+    onDeleteFile: (File) -> Unit,
+    onLoadSelected: (List<File>) -> Unit,
+    onLoadAll: () -> Unit
+) {
+    var selectedFiles by remember { mutableStateOf(setOf<File>()) }
+    var filePendingDelete by remember { mutableStateOf<File?>(null) }
+    val dateFormat = remember { SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault()) }
+
+    LaunchedEffect(files) {
+        selectedFiles = selectedFiles.filter { it in files }.toSet()
+    }
+
+    val isAllSelected = files.isNotEmpty() && selectedFiles.size == files.size
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    imageVector = Icons.Default.FolderZip,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Column {
+                    Text(
+                        text = "SkinZips Archive",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "${files.size} archive(s) found",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(8.dp)) {
+                        Text(
+                            text = "DIRECTORY:",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = directoryPath,
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(
+                        onClick = onImportZips,
+                        contentPadding = ButtonDefaults.ButtonWithIconContentPadding
+                    ) {
+                        Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Import ZIPs")
+                    }
+
+                    if (files.isNotEmpty()) {
+                        TextButton(
+                            onClick = {
+                                selectedFiles = if (isAllSelected) emptySet() else files.toSet()
+                            }
+                        ) {
+                            Text(if (isAllSelected) "Deselect All" else "Select All")
+                        }
+                    }
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                if (files.isEmpty()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.FolderOpen,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                            modifier = Modifier.size(44.dp)
+                        )
+                        Text(
+                            text = "No ZIP files in skinzips",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "Tap 'Import ZIPs' to add existing skin zip files from your device storage.",
+                            style = MaterialTheme.typography.bodySmall,
+                            textAlign = TextAlign.Center,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 320.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        files.forEach { file ->
+                            val isChecked = file in selectedFiles
+                            OutlinedCard(
+                                onClick = {
+                                    selectedFiles = if (isChecked) {
+                                        selectedFiles - file
+                                    } else {
+                                        selectedFiles + file
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(10.dp),
+                                colors = CardDefaults.outlinedCardColors(
+                                    containerColor = if (isChecked) {
+                                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
+                                    } else {
+                                        MaterialTheme.colorScheme.surface
+                                    }
+                                )
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Checkbox(
+                                        checked = isChecked,
+                                        onCheckedChange = { checked ->
+                                            selectedFiles = if (checked) {
+                                                selectedFiles + file
+                                            } else {
+                                                selectedFiles - file
+                                            }
+                                        }
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = file.name,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = "${formatByteSize(file.length())} • ${dateFormat.format(Date(file.lastModified()))}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = { filePendingDelete = file }
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Delete,
+                                            contentDescription = "Delete",
+                                            tint = MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (selectedFiles.isEmpty()) {
+                        onLoadAll()
+                    } else {
+                        onLoadSelected(selectedFiles.toList())
+                    }
+                },
+                enabled = files.isNotEmpty()
+            ) {
+                Text(
+                    if (selectedFiles.isNotEmpty()) {
+                        "Load Selected (${selectedFiles.size})"
+                    } else {
+                        "Load All (${files.size})"
+                    }
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        }
+    )
+
+    filePendingDelete?.let { file ->
+        AlertDialog(
+            onDismissRequest = { filePendingDelete = null },
+            title = { Text("Delete Archive?") },
+            text = {
+                Text("Delete '${file.name}' from the skinzips folder? This action cannot be undone.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDeleteFile(file)
+                        filePendingDelete = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { filePendingDelete = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 }

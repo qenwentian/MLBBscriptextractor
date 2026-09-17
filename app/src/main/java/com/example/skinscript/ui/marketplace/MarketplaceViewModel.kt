@@ -261,6 +261,10 @@ class MarketplaceViewModel(application: Application) : AndroidViewModel(applicat
         _errorMessage.value = null
     }
 
+    fun dismissUpdate() {
+        _updateCheckState.value = UpdateCheckState.UpToDate
+    }
+
     // --- Auto Update Logic ---
     fun checkForAppUpdates() {
         viewModelScope.launch {

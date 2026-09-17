@@ -23,6 +23,7 @@ import com.example.skinscript.shizuku.ShizukuFileBackend
 import com.example.skinscript.shizuku.ShizukuManager
 import com.example.skinscript.shizuku.ShizukuState
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -30,6 +31,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.CancellationException
 
@@ -122,8 +124,12 @@ class SkinInstallerViewModel(application: Application) : AndroidViewModel(applic
     private val _conflictPrompt = MutableStateFlow<ConflictPromptData?>(null)
     val conflictPrompt: StateFlow<ConflictPromptData?> = _conflictPrompt.asStateFlow()
 
+    private val _skinzipsList = MutableStateFlow<List<File>>(emptyList())
+    val skinzipsList: StateFlow<List<File>> = _skinzipsList.asStateFlow()
+
     init {
         shizukuManager.init()
+        refreshSkinZips()
     }
 
     override fun onCleared() {
@@ -177,6 +183,38 @@ class SkinInstallerViewModel(application: Application) : AndroidViewModel(applic
 
     fun clearLoadedPackages() {
         _loadedPackages.value = emptyList()
+    }
+
+    fun getSkinZipsDirectoryPath(): String {
+        return skinStorageManager.getSkinZipsDirectory().absolutePath
+    }
+
+    fun refreshSkinZips() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _skinzipsList.value = skinStorageManager.listSkinZips()
+        }
+    }
+
+    fun importZipsToSkinZips(uris: List<Uri>, onCompleted: ((Int) -> Unit)? = null) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val imported = skinStorageManager.importZips(uris)
+            _skinzipsList.value = skinStorageManager.listSkinZips()
+            withContext(Dispatchers.Main) {
+                onCompleted?.invoke(imported.size)
+            }
+        }
+    }
+
+    fun deleteSkinZip(file: File) {
+        viewModelScope.launch(Dispatchers.IO) {
+            skinStorageManager.deleteZip(file)
+            _skinzipsList.value = skinStorageManager.listSkinZips()
+        }
+    }
+
+    fun loadSelectedSkinZips(files: List<File>) {
+        if (files.isEmpty()) return
+        loadZips(files.map { skinStorageManager.getFileUri(it) })
     }
 
     fun loadFromSkinZipsFolder() {
