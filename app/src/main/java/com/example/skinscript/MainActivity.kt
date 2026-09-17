@@ -77,6 +77,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -203,6 +204,7 @@ fun SkinInstallerApp(
 
     // Auto updater state
     val updateCheckState by marketplaceViewModel.updateCheckState.collectAsState()
+    val updateDownloadState by marketplaceViewModel.updateDownloadState.collectAsState()
     var showManualUpdatePrompt by remember { mutableStateOf(false) }
 
     LaunchedEffect(updateCheckState) {
