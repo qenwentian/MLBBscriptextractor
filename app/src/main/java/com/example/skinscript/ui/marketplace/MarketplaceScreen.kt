@@ -105,9 +105,20 @@ fun MarketplaceScreen(
         }
     }
 
-    val popularHeroes = listOf(
-        "All", "Martis", "Chou", "Selena", "Gusion", "Ling", "Fanny", "Alucard",
-        "Lancelot", "Hayabusa", "Claude", "AOT", "Config", "Backup"
+    val allHeroes = listOf(
+        "All", "Aamon", "Akai", "Aldous", "Alice", "Alpha", "Alucard", "Angela", "Argus", "Arlott",
+        "Atlas", "Aulus", "Badang", "Balmond", "Bane", "Barats", "Baxia", "Beatrix", "Belerick", "Benedetta",
+        "Brody", "Bruno", "Carmilla", "Cecilion", "Chang'e", "Chou", "Cici", "Chip", "Claude", "Clint",
+        "Cyclops", "Diggie", "Dyrroth", "Edith", "Esmeralda", "Estes", "Eudora", "Fanny", "Faramis", "Floryn",
+        "Franco", "Fredrinn", "Freya", "Gatotkaca", "Gloo", "Gord", "Granger", "Grock", "Guinevere", "Gusion",
+        "Hanabi", "Hanzo", "Harith", "Harley", "Hayabusa", "Helcurt", "Hilda", "Hylos", "Irithel", "Ixia",
+        "Jawhead", "Johnson", "Joy", "Julian", "Kadita", "Kagura", "Kaja", "Karina", "Karrie", "Khaleed",
+        "Khufra", "Kimmy", "Lancelot", "Lapu-Lapu", "Layla", "Leomord", "Lesley", "Ling", "Lolita", "Lukas",
+        "Lunox", "Luo Yi", "Lylia", "Martis", "Masha", "Mathilda", "Melissa", "Minotaur", "Minsitthar", "Miya",
+        "Moskov", "Nana", "Natalia", "Natan", "Nolan", "Novaria", "Odette", "Paquito", "Pharsa", "Phoveus",
+        "Popol and Kupa", "Rafaela", "Roger", "Ruby", "Saber", "Selena", "Silvanna", "Sun", "Suyou", "Terizla",
+        "Thamuz", "Tigreal", "Uranus", "Vale", "Valentina", "Valir", "Vexana", "Wanwan", "Xavier", "X.Borg",
+        "Yi Sun-shin", "Yin", "Yu Zhong", "Yve", "Zhask", "Zhuxin", "Zilong", "AOT", "Anime", "Config", "Backup"
     )
 
     Column(
@@ -195,7 +206,7 @@ fun MarketplaceScreen(
                 .horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            popularHeroes.forEach { heroName ->
+            allHeroes.forEach { heroName ->
                 val isSelected = if (heroName == "All") selectedHeroFilter == null else selectedHeroFilter.equals(heroName, ignoreCase = true)
                 FilterChip(
                     selected = isSelected,
@@ -256,7 +267,7 @@ fun MarketplaceScreen(
                 ) {
                     CircularProgressIndicator(modifier = Modifier.size(36.dp))
                     Text(
-                        text = "Loading skins from marketplace...",
+                        text = "Loading skin database...",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -572,7 +583,7 @@ fun MarketplaceItemCard(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = "⚠ ${status.errorMessage}",
+                            text = status.errorMessage,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error,
                             modifier = Modifier.weight(1f),

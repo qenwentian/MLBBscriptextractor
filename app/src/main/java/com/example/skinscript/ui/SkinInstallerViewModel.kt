@@ -5,11 +5,16 @@ import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.skinscript.data.ConflictDetector
+import com.example.skinscript.data.ConflictGroup
+import com.example.skinscript.data.ExtractedSkinRecord
+import com.example.skinscript.data.ExtractedSkinsRepository
 import com.example.skinscript.data.InstallProgress
 import com.example.skinscript.data.InstallSummary
 import com.example.skinscript.data.OverwriteMode
 import com.example.skinscript.data.SettingsRepository
 import com.example.skinscript.data.SkinPackage
+import com.example.skinscript.data.SkinStorageManager
 import com.example.skinscript.data.ZipAnalyzer
 import com.example.skinscript.installer.FileOperationBackend
 import com.example.skinscript.installer.OverwriteDecision
@@ -25,12 +30,18 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.io.File
 import java.util.concurrent.CancellationException
 
 data class OverwritePromptData(
     val fileName: String,
     val targetPath: String,
     val deferredResult: CompletableDeferred<OverwriteDecision>
+)
+
+data class ConflictPromptData(
+    val conflictGroup: ConflictGroup,
+    val deferredResult: CompletableDeferred<SkinPackage?>
 )
 
 class SkinInstallerViewModel(application: Application) : AndroidViewModel(application) {
@@ -43,6 +54,8 @@ class SkinInstallerViewModel(application: Application) : AndroidViewModel(applic
     val shizukuManager = ShizukuManager(context)
     private val settingsRepository = SettingsRepository(context)
     private val zipAnalyzer = ZipAnalyzer(context)
+    private val skinStorageManager = SkinStorageManager(context)
+    private val extractedSkinsRepository = ExtractedSkinsRepository(context)
     private val fileBackend: FileOperationBackend = ShizukuFileBackend()
     private val installer = SkinInstaller(context, fileBackend)
 
@@ -64,11 +77,26 @@ class SkinInstallerViewModel(application: Application) : AndroidViewModel(applic
             initialValue = OverwriteMode.ASK_EVERY_TIME
         )
 
+    val savedExtractedSkins: StateFlow<List<ExtractedSkinRecord>> = extractedSkinsRepository.savedSkins
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyList()
+        )
+
     private val _isAnalyzing = MutableStateFlow(false)
     val isAnalyzing: StateFlow<Boolean> = _isAnalyzing.asStateFlow()
 
-    private val _skinPackage = MutableStateFlow<SkinPackage?>(null)
-    val skinPackage: StateFlow<SkinPackage?> = _skinPackage.asStateFlow()
+    private val _loadedPackages = MutableStateFlow<List<SkinPackage>>(emptyList())
+    val loadedPackages: StateFlow<List<SkinPackage>> = _loadedPackages.asStateFlow()
+
+    val skinPackage: StateFlow<SkinPackage?> = MutableStateFlow<SkinPackage?>(null).apply {
+        viewModelScope.launch {
+            _loadedPackages.collect { pkgs ->
+                value = pkgs.firstOrNull()
+            }
+        }
+    }.asStateFlow()
 
     private val _analysisError = MutableStateFlow<String?>(null)
     val analysisError: StateFlow<String?> = _analysisError.asStateFlow()
@@ -91,36 +119,120 @@ class SkinInstallerViewModel(application: Application) : AndroidViewModel(applic
     private val _overwritePrompt = MutableStateFlow<OverwritePromptData?>(null)
     val overwritePrompt: StateFlow<OverwritePromptData?> = _overwritePrompt.asStateFlow()
 
+    private val _conflictPrompt = MutableStateFlow<ConflictPromptData?>(null)
+    val conflictPrompt: StateFlow<ConflictPromptData?> = _conflictPrompt.asStateFlow()
+
     init {
         shizukuManager.init()
     }
 
     override fun onCleared() {
         super.onCleared()
-        cancelPendingOverwritePrompt()
+        cancelPendingPrompts()
         shizukuManager.destroy()
     }
 
     fun loadZip(uri: Uri) {
+        loadZips(listOf(uri))
+    }
+
+    fun loadZips(uris: List<Uri>) {
         viewModelScope.launch {
             _isAnalyzing.value = true
             _analysisError.value = null
             _installSummary.value = null
 
-            zipAnalyzer.analyze(uri).fold(
-                onSuccess = { pkg ->
-                    _skinPackage.value = pkg
-                    if (!pkg.hasValidAssets) {
-                        _analysisError.value = "No valid game folders (Art, Audio, UI) detected in this ZIP archive."
+            val analyzed = mutableListOf<SkinPackage>()
+            val errors = mutableListOf<String>()
+
+            for (uri in uris) {
+                zipAnalyzer.analyze(uri).fold(
+                    onSuccess = { pkg ->
+                        if (pkg.hasValidAssets) {
+                            analyzed.add(pkg)
+                        } else {
+                            errors.add("${pkg.displayName}: No valid game folders (Art, Audio, UI) detected.")
+                        }
+                    },
+                    onFailure = { error ->
+                        Log.e(TAG, "Failed to analyze ZIP: $uri", error)
+                        errors.add("Failed to analyze $uri: ${error.localizedMessage ?: "Unknown error"}")
                     }
-                },
-                onFailure = { error ->
-                    Log.e(TAG, "Failed to analyze ZIP: $uri", error)
-                    _skinPackage.value = null
-                    _analysisError.value = "Failed to analyze ZIP: ${error.localizedMessage ?: "Unknown error"}"
-                }
-            )
+                )
+            }
+
+            _loadedPackages.value = analyzed
+            if (errors.isNotEmpty() && analyzed.isEmpty()) {
+                _analysisError.value = errors.joinToString("\n")
+            } else if (errors.isNotEmpty()) {
+                _analysisError.value = "Some packages could not be loaded:\n" + errors.joinToString("\n")
+            }
             _isAnalyzing.value = false
+        }
+    }
+
+    fun removePackage(pkg: SkinPackage) {
+        _loadedPackages.value = _loadedPackages.value.filter { it != pkg }
+    }
+
+    fun clearLoadedPackages() {
+        _loadedPackages.value = emptyList()
+    }
+
+    fun loadFromSkinZipsFolder() {
+        val zips = skinStorageManager.listSkinZips()
+        if (zips.isEmpty()) {
+            _analysisError.value = "No ZIP archives found in skinzips folder."
+            return
+        }
+        loadZips(zips.map { skinStorageManager.getFileUri(it) })
+    }
+
+    fun reextractAllSkins() {
+        viewModelScope.launch {
+            _isAnalyzing.value = true
+            _analysisError.value = null
+            val saved = savedExtractedSkins.value
+            if (saved.isEmpty()) {
+                val zips = skinStorageManager.listSkinZips()
+                if (zips.isEmpty()) {
+                    _analysisError.value = "No saved extracted skins or skinzips found to re-extract."
+                    _isAnalyzing.value = false
+                    return@launch
+                }
+                loadZips(zips.map { skinStorageManager.getFileUri(it) })
+                return@launch
+            }
+
+            val urisToLoad = mutableListOf<Uri>()
+            for (record in saved) {
+                val file = record.filePath?.let { File(it) }
+                if (file != null && file.exists()) {
+                    urisToLoad.add(skinStorageManager.getFileUri(file))
+                } else {
+                    val inDirZip = File(skinStorageManager.getSkinZipsDirectory(), "${record.displayName}.zip")
+                    if (inDirZip.exists()) {
+                        urisToLoad.add(skinStorageManager.getFileUri(inDirZip))
+                    } else {
+                        val inDirExact = File(skinStorageManager.getSkinZipsDirectory(), record.displayName)
+                        if (inDirExact.exists()) {
+                            urisToLoad.add(skinStorageManager.getFileUri(inDirExact))
+                        } else {
+                            try {
+                                urisToLoad.add(Uri.parse(record.fileUriString))
+                            } catch (_: Exception) {}
+                        }
+                    }
+                }
+            }
+
+            if (urisToLoad.isEmpty()) {
+                _analysisError.value = "Could not locate the saved skin zip files in storage."
+                _isAnalyzing.value = false
+                return@launch
+            }
+
+            loadZips(urisToLoad.distinct())
         }
     }
 
@@ -161,9 +273,9 @@ class SkinInstallerViewModel(application: Application) : AndroidViewModel(applic
                 val exists = fileBackend.exists(path)
                 val writable = fileBackend.isWritable(path)
                 _testAccessResult.value = if (writable) {
-                    "✓ Destination is accessible and writable (Exists: $exists)"
+                    "Destination is accessible and writable (Exists: $exists)"
                 } else {
-                    "⚠ Destination test returned non-writable: $path"
+                    "Destination test returned non-writable: $path"
                 }
             } catch (e: Throwable) {
                 _testAccessResult.value = "Error testing destination: ${e.localizedMessage}"
@@ -174,23 +286,34 @@ class SkinInstallerViewModel(application: Application) : AndroidViewModel(applic
 
     fun startInstall() {
         if (_isInstalling.value) return
-        val currentPackage = _skinPackage.value ?: return
+        val currentPackages = _loadedPackages.value
+        if (currentPackages.isEmpty()) return
+
         val dest = destinationPath.value
         val mode = overwriteMode.value
 
         installJob = viewModelScope.launch {
             _isInstalling.value = true
             _installSummary.value = null
+
+            // 1. Conflict resolution across packages
+            val resolvedPackages = resolveDuplicateConflicts(currentPackages)
+            if (resolvedPackages.isEmpty()) {
+                _isInstalling.value = false
+                return@launch
+            }
+
+            val totalFilesAcrossAll = resolvedPackages.sumOf { it.totalFiles }
             _installProgress.value = InstallProgress(
                 currentFileName = "Starting...",
                 completedCount = 0,
-                totalCount = currentPackage.totalFiles,
+                totalCount = totalFilesAcrossAll,
                 isIndeterminate = true
             )
 
             try {
-                val summary = installer.install(
-                    skinPackage = currentPackage,
+                val summary = installer.installBatch(
+                    packages = resolvedPackages,
                     destinationBasePath = dest,
                     overwriteMode = mode,
                     onProgress = { progress ->
@@ -209,6 +332,11 @@ class SkinInstallerViewModel(application: Application) : AndroidViewModel(applic
                     }
                 )
                 _installSummary.value = summary
+
+                // Record successfully installed packages into registry
+                if (summary.success > 0) {
+                    extractedSkinsRepository.recordExtracted(resolvedPackages)
+                }
             } catch (e: CancellationException) {
                 Log.d(TAG, "Installation cancelled by user.")
             } catch (e: Throwable) {
@@ -217,7 +345,48 @@ class SkinInstallerViewModel(application: Application) : AndroidViewModel(applic
             } finally {
                 _isInstalling.value = false
                 _overwritePrompt.value = null
+                _conflictPrompt.value = null
             }
+        }
+    }
+
+    private suspend fun resolveDuplicateConflicts(packages: List<SkinPackage>): List<SkinPackage> {
+        if (packages.size <= 1) return packages
+
+        val conflictGroups = findConflictGroups(packages)
+        if (conflictGroups.isEmpty()) return packages
+
+        val excluded = mutableSetOf<SkinPackage>()
+
+        for (group in conflictGroups) {
+            val deferred = CompletableDeferred<SkinPackage?>()
+            _conflictPrompt.value = ConflictPromptData(group, deferred)
+            val chosen = deferred.await()
+            _conflictPrompt.value = null
+
+            if (chosen != null) {
+                // Keep only the chosen package from this group
+                for (p in group.packages) {
+                    if (p != chosen) {
+                        excluded.add(p)
+                    }
+                }
+            } else {
+                // User skipped entire conflicting group
+                excluded.addAll(group.packages)
+            }
+        }
+
+        return packages.filter { it !in excluded }
+    }
+
+    fun findConflictGroups(packages: List<SkinPackage>): List<ConflictGroup> =
+        ConflictDetector.findConflictGroups(packages)
+
+    fun respondToConflictPrompt(chosenPackage: SkinPackage?) {
+        val currentPrompt = _conflictPrompt.value
+        if (currentPrompt != null && currentPrompt.deferredResult.isActive) {
+            currentPrompt.deferredResult.complete(chosenPackage)
         }
     }
 
@@ -229,17 +398,23 @@ class SkinInstallerViewModel(application: Application) : AndroidViewModel(applic
     }
 
     fun cancelInstall() {
-        cancelPendingOverwritePrompt()
+        cancelPendingPrompts()
         installJob?.cancel()
         _isInstalling.value = false
     }
 
-    private fun cancelPendingOverwritePrompt() {
+    private fun cancelPendingPrompts() {
         _overwritePrompt.value?.let { prompt ->
             if (prompt.deferredResult.isActive) {
                 prompt.deferredResult.cancel(CancellationException("Prompt dismissed or cancelled."))
             }
             _overwritePrompt.value = null
+        }
+        _conflictPrompt.value?.let { prompt ->
+            if (prompt.deferredResult.isActive) {
+                prompt.deferredResult.cancel(CancellationException("Prompt dismissed or cancelled."))
+            }
+            _conflictPrompt.value = null
         }
     }
 

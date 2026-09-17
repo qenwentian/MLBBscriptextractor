@@ -5,6 +5,9 @@ import android.net.Uri
 import android.util.Log
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.Cookie
@@ -13,6 +16,7 @@ import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
+import com.example.skinscript.data.SkinStorageManager
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
@@ -20,6 +24,7 @@ import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
+import java.util.zip.ZipFile
 
 class SfileRepository(private val context: Context) {
 
@@ -58,12 +63,17 @@ class SfileRepository(private val context: Context) {
         .followSslRedirects(true)
         .build()
 
+    private val skinStorageManager = SkinStorageManager(context)
+
     private val downloadDirectory: File by lazy {
-        val dir = File(context.getExternalFilesDir(null), "downloads/skins")
-        if (!dir.exists()) {
-            dir.mkdirs()
-        }
-        dir
+        skinStorageManager.getSkinZipsDirectory()
+    }
+
+    private val userRepoCache = ConcurrentHashMap<String, MarketplaceItem>()
+    private var totalCachedPages = 1
+
+    fun getCachedUserItems(): List<MarketplaceItem> {
+        return userRepoCache.values.toList()
     }
 
     suspend fun fetchUserFiles(page: Int = 1): Result<MarketplacePage> = withContext(Dispatchers.IO) {
@@ -81,11 +91,49 @@ class SfileRepository(private val context: Context) {
                 }
                 val html = response.body?.string() ?: return@withContext Result.failure(Exception("Empty response body"))
                 val parsedPage = parseUserFilesHtml(html, page)
+                
+                // Cache items
+                for (item in parsedPage.items) {
+                    userRepoCache[item.id] = item
+                }
+                totalCachedPages = maxOf(totalCachedPages, parsedPage.totalPages)
+                
                 Result.success(parsedPage)
             }
         } catch (e: Throwable) {
             Log.e(TAG, "Error fetching user files page $page", e)
             Result.failure(e)
+        }
+    }
+
+    suspend fun indexAllUserPages(
+        onBatchLoaded: (List<MarketplaceItem>) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        try {
+            // First ensure page 1 is loaded to get total pages
+            val p1 = fetchUserFiles(1).getOrNull()
+            val total = p1?.totalPages ?: totalCachedPages
+            onBatchLoaded(userRepoCache.values.toList())
+
+            if (total <= 1) return@withContext
+
+            // Fetch remaining pages in concurrent chunks
+            val pagesToFetch = (2..total).toList()
+            val chunks = pagesToFetch.chunked(6)
+            for (chunk in chunks) {
+                coroutineScope {
+                    val deferreds = chunk.map { pageNum ->
+                        async {
+                            fetchUserFiles(pageNum)
+                        }
+                    }
+                    deferreds.awaitAll()
+                }
+                onBatchLoaded(userRepoCache.values.toList())
+            }
+            Log.d(TAG, "Completed indexing all $total pages. Total items: ${userRepoCache.size}")
+        } catch (e: Throwable) {
+            Log.e(TAG, "Error during full repo background indexing", e)
         }
     }
 
@@ -282,7 +330,7 @@ class SfileRepository(private val context: Context) {
                 for (p in patterns) {
                     val m = p.matcher(html2)
                     if (m.find()) {
-                        found = m.group(0)?.replace("\\/", "/")
+                        found = m.group(0)?.replace("\\/", "/")?.replace("&amp;", "&")
                         break
                     }
                 }
@@ -354,18 +402,56 @@ class SfileRepository(private val context: Context) {
                     return@withContext Result.failure(Exception("Downloaded file is too small or invalid."))
                 }
 
+                // If downloaded ZIP contains a nested skin ZIP, unwrap it directly into skinzips
+                val finalFile = unwrapNestedZipIfPresent(targetFile)
+
                 val uri = FileProvider.getUriForFile(
                     context,
                     "${context.packageName}.fileprovider",
-                    targetFile
+                    finalFile
                 )
 
-                Log.d(TAG, "Download finished successfully: ${targetFile.absolutePath} (Size: ${targetFile.length()} bytes)")
-                Result.success(Pair(targetFile, uri))
+                Log.d(TAG, "Download finished successfully: ${finalFile.absolutePath} (Size: ${finalFile.length()} bytes)")
+                Result.success(Pair(finalFile, uri))
             }
         } catch (e: Throwable) {
             Log.e(TAG, "Error in resolveAndDownloadZip for ${item.title}", e)
             Result.failure(e)
+        }
+    }
+
+    private fun unwrapNestedZipIfPresent(zipFile: File): File {
+        return try {
+            ZipFile(zipFile).use { zf ->
+                val entries = zf.entries().toList()
+                val nonDir = entries.filter { !it.isDirectory }
+                val zipEntries = nonDir.filter { it.name.endsWith(".zip", ignoreCase = true) }
+                val hasDirectAssets = nonDir.any { entry ->
+                    val lower = entry.name.lowercase()
+                    lower.contains("/art/") || lower.startsWith("art/") ||
+                    lower.contains("/audio/") || lower.startsWith("audio/") ||
+                    lower.contains("/ui/") || lower.startsWith("ui/")
+                }
+
+                if (!hasDirectAssets && zipEntries.isNotEmpty()) {
+                    val targetEntry = zipEntries.first()
+                    val targetName = File(targetEntry.name).name
+                    val unwrappedFile = File(zipFile.parentFile, targetName)
+                    zf.getInputStream(targetEntry).use { inStream ->
+                        FileOutputStream(unwrappedFile).use { outStream ->
+                            inStream.copyTo(outStream)
+                        }
+                    }
+                    Log.d(TAG, "Auto-unwrapped nested ZIP: ${unwrappedFile.name}")
+                    zipFile.delete()
+                    unwrappedFile
+                } else {
+                    zipFile
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Nested zip check failed: ${e.message}")
+            zipFile
         }
     }
 

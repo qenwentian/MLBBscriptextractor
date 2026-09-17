@@ -121,7 +121,7 @@ fun AppUpdateDialog(
 
                     is UpdateDownloadState.Error -> {
                         Text(
-                            text = "⚠ ${downloadState.message}",
+                            text = downloadState.message,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error
                         )

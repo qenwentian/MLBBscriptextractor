@@ -48,6 +48,9 @@ class MarketplaceViewModel(application: Application) : AndroidViewModel(applicat
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
 
+    private val _allIndexedItems = MutableStateFlow<List<MarketplaceItem>>(emptyList())
+    val allIndexedItems: StateFlow<List<MarketplaceItem>> = _allIndexedItems.asStateFlow()
+
     private val _currentPage = MutableStateFlow(1)
     val currentPage: StateFlow<Int> = _currentPage.asStateFlow()
 
@@ -68,10 +71,24 @@ class MarketplaceViewModel(application: Application) : AndroidViewModel(applicat
     val updateDownloadState: StateFlow<UpdateDownloadState> = _updateDownloadState.asStateFlow()
 
     private var searchJob: Job? = null
+    private var indexJob: Job? = null
 
     init {
         loadInitialPage()
+        startIndexingAllPages()
         checkForAppUpdates()
+    }
+
+    private fun startIndexingAllPages() {
+        indexJob?.cancel()
+        indexJob = viewModelScope.launch {
+            sfileRepository.indexAllUserPages { batch ->
+                _allIndexedItems.value = batch
+                if (_searchQuery.value.isEmpty() && _selectedHeroFilter.value == null && _rawItems.value.size <= 25) {
+                    _rawItems.value = batch
+                }
+            }
+        }
     }
 
     fun loadInitialPage() {
@@ -81,6 +98,16 @@ class MarketplaceViewModel(application: Application) : AndroidViewModel(applicat
             _currentPage.value = 1
 
             val query = _searchQuery.value.trim()
+            if (query.isNotEmpty()) {
+                // Instant local filter on indexed items
+                val cached = _allIndexedItems.value.filter { it.title.contains(query, ignoreCase = true) }
+                if (cached.isNotEmpty()) {
+                    _rawItems.value = cached
+                    _isLoading.value = false
+                    return@launch
+                }
+            }
+
             val result = if (query.isEmpty()) {
                 sfileRepository.fetchUserFiles(page = 1)
             } else {
@@ -136,8 +163,24 @@ class MarketplaceViewModel(application: Application) : AndroidViewModel(applicat
         _searchQuery.value = query
         searchJob?.cancel()
         searchJob = viewModelScope.launch {
-            delay(400) // Debounce typing
-            loadInitialPage()
+            delay(200) // Fast debounce typing
+            if (query.isBlank()) {
+                val cached = _allIndexedItems.value
+                if (cached.isNotEmpty()) {
+                    _rawItems.value = cached
+                } else {
+                    loadInitialPage()
+                }
+            } else {
+                // Instantly search in full indexed dataset
+                val localMatches = _allIndexedItems.value.filter { it.title.contains(query, ignoreCase = true) }
+                if (localMatches.isNotEmpty()) {
+                    _rawItems.value = localMatches
+                } else {
+                    // Fallback to online sfile search
+                    loadInitialPage()
+                }
+            }
         }
     }
 
@@ -147,14 +190,14 @@ class MarketplaceViewModel(application: Application) : AndroidViewModel(applicat
 
     val displayedItems: List<MarketplaceItem>
         get() {
-            val all = _rawItems.value
+            val query = _searchQuery.value.trim()
             val hero = _selectedHeroFilter.value
-            return if (hero == null) {
-                all
-            } else {
-                all.filter { item ->
-                    item.title.contains(hero, ignoreCase = true)
-                }
+            val sourceList = if (_allIndexedItems.value.isNotEmpty()) _allIndexedItems.value else _rawItems.value
+
+            return sourceList.filter { item ->
+                val matchesHero = if (hero == null) true else item.title.contains(hero, ignoreCase = true)
+                val matchesQuery = if (query.isEmpty()) true else item.title.contains(query, ignoreCase = true)
+                matchesHero && matchesQuery
             }
         }
 
