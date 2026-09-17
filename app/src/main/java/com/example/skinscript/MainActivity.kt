@@ -203,8 +203,13 @@ fun SkinInstallerApp(
 
     // Auto updater state
     val updateCheckState by marketplaceViewModel.updateCheckState.collectAsState()
-    val updateDownloadState by marketplaceViewModel.updateDownloadState.collectAsState()
     var showManualUpdatePrompt by remember { mutableStateOf(false) }
+
+    LaunchedEffect(updateCheckState) {
+        if (updateCheckState is UpdateCheckState.UpdateAvailable) {
+            showManualUpdatePrompt = true
+        }
+    }
 
     var showDestinationDialog by remember { mutableStateOf(false) }
     var showOverwriteDialog by remember { mutableStateOf(false) }
