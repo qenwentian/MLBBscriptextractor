@@ -17,6 +17,12 @@ class ExampleUnitTest {
         assertTrue(AppUpdateManager.isVersionNewer("v5", "4.0", 4L))
         assertTrue(AppUpdateManager.isVersionNewer("5", "4.0", 4L))
 
+        // When user is on v6.0 (versionCode 6), release v6 should NOT trigger update
+        assertFalse(AppUpdateManager.isVersionNewer("v6", "6.0", 6L))
+        assertFalse(AppUpdateManager.isVersionNewer("6", "6.0", 6L))
+        assertFalse(AppUpdateManager.isVersionNewer("v6.0", "6.0", 6L))
+        assertFalse(AppUpdateManager.isVersionNewer("6.0", "6.0", 6L))
+
         // Newer version tags
         assertTrue(AppUpdateManager.isVersionNewer("v6", "5.0", 5L))
         assertTrue(AppUpdateManager.isVersionNewer("6", "5.0", 5L))

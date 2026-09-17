@@ -261,8 +261,15 @@ class MarketplaceViewModel(application: Application) : AndroidViewModel(applicat
         _errorMessage.value = null
     }
 
-    fun dismissUpdate() {
+    fun dismissUpdate(version: String? = null) {
+        if (version != null) {
+            appUpdateManager.setDismissedVersion(version)
+        }
         _updateCheckState.value = UpdateCheckState.UpToDate
+    }
+
+    fun isVersionDismissed(version: String): Boolean {
+        return appUpdateManager.isVersionDismissed(version)
     }
 
     // --- Auto Update Logic ---

@@ -215,8 +215,11 @@ fun SkinInstallerApp(
     var showManualUpdatePrompt by remember { mutableStateOf(false) }
 
     LaunchedEffect(updateCheckState) {
-        if (updateCheckState is UpdateCheckState.UpdateAvailable) {
-            showManualUpdatePrompt = true
+        val available = updateCheckState as? UpdateCheckState.UpdateAvailable
+        if (available != null) {
+            if (!marketplaceViewModel.isVersionDismissed(available.info.versionName)) {
+                showManualUpdatePrompt = true
+            }
         }
     }
 
@@ -449,7 +452,7 @@ fun SkinInstallerApp(
                 },
                 onDismiss = {
                     showManualUpdatePrompt = false
-                    marketplaceViewModel.dismissUpdate()
+                    marketplaceViewModel.dismissUpdate(info.versionName)
                 }
             )
         }

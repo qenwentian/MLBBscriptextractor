@@ -207,6 +207,21 @@ class AppUpdateManager(private val context: Context) {
         }
     }
 
+    fun setDismissedVersion(version: String) {
+        val clean = version.trim().removePrefix("v").removePrefix("V").trim()
+        context.getSharedPreferences("app_updates", Context.MODE_PRIVATE)
+            .edit()
+            .putString("dismissed_version", clean)
+            .apply()
+    }
+
+    fun isVersionDismissed(version: String): Boolean {
+        val clean = version.trim().removePrefix("v").removePrefix("V").trim()
+        val dismissed = context.getSharedPreferences("app_updates", Context.MODE_PRIVATE)
+            .getString("dismissed_version", null)
+        return dismissed != null && dismissed.equals(clean, ignoreCase = true)
+    }
+
     suspend fun downloadApk(
         updateInfo: AppUpdateInfo,
         onProgress: (Float, Long, Long) -> Unit
