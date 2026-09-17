@@ -46,7 +46,7 @@ class AppUpdateManager(private val context: Context) {
     companion object {
         private const val TAG = "AppUpdateManager"
         const val DEFAULT_GITHUB_OWNER = "qenwentian"
-        const val DEFAULT_GITHUB_REPO = "SkinScript"
+        const val DEFAULT_GITHUB_REPO = "MLBBscriptextractor"
         private const val GITHUB_API_BASE = "https://api.github.com/repos"
     }
 
