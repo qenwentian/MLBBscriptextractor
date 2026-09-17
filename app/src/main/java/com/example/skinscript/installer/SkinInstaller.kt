@@ -41,6 +41,61 @@ class SkinInstaller(
         private const val STREAM_BUFFER_SIZE = 128 * 1024
     }
 
+    suspend fun installBatch(
+        packages: List<SkinPackage>,
+        destinationBasePath: String,
+        overwriteMode: OverwriteMode,
+        onPackageStart: (index: Int, total: Int, pkg: SkinPackage) -> Unit = { _, _, _ -> },
+        onProgress: (InstallProgress) -> Unit = {},
+        onPromptOverwrite: (suspend (fileName: String, targetPath: String) -> OverwriteDecision)? = null
+    ): InstallSummary = withContext(Dispatchers.IO) {
+        val overallStartTime = System.currentTimeMillis()
+        var totalCount = 0
+        var successCount = 0
+        var skippedCount = 0
+        var failedCount = 0
+        val allErrors = mutableListOf<String>()
+
+        val grandTotalFiles = packages.sumOf { it.totalFiles }
+        var filesProcessedSoFar = 0
+
+        for ((idx, pkg) in packages.withIndex()) {
+            onPackageStart(idx, packages.size, pkg)
+            val pkgSummary = install(
+                skinPackage = pkg,
+                destinationBasePath = destinationBasePath,
+                overwriteMode = overwriteMode,
+                onProgress = { p ->
+                    onProgress(
+                        InstallProgress(
+                            currentFileName = "[${idx + 1}/${packages.size}] ${p.currentFileName}",
+                            completedCount = filesProcessedSoFar + p.completedCount,
+                            totalCount = grandTotalFiles,
+                            isIndeterminate = p.isIndeterminate
+                        )
+                    )
+                },
+                onPromptOverwrite = onPromptOverwrite
+            )
+
+            totalCount += pkgSummary.total
+            successCount += pkgSummary.success
+            skippedCount += pkgSummary.skipped
+            failedCount += pkgSummary.failed
+            allErrors.addAll(pkgSummary.errors)
+            filesProcessedSoFar += pkgSummary.total
+        }
+
+        InstallSummary(
+            total = totalCount,
+            success = successCount,
+            skipped = skippedCount,
+            failed = failedCount,
+            errors = allErrors,
+            durationMs = System.currentTimeMillis() - overallStartTime
+        )
+    }
+
     suspend fun install(
         skinPackage: SkinPackage,
         destinationBasePath: String,
@@ -211,7 +266,7 @@ class SkinInstaller(
             var writtenCount = 0
 
             // Try random-access ZipFile first
-            val zipFile = tryOpenZipFile(skinPackage.sourceUri)
+            val zipFile = tryOpenZipFile(skinPackage.sourceUri, skinPackage.unwrappedFile)
 
             if (zipFile != null) {
                 zipFile.use { zf ->
@@ -244,8 +299,7 @@ class SkinInstaller(
                 }
             } else {
                 // Fallback to streaming ZipInputStream into tarWriter
-                val inStream = context.contentResolver.openInputStream(skinPackage.sourceUri)
-                    ?: throw IllegalStateException("Cannot open input stream for ${skinPackage.sourceUri}")
+                val inStream = openInputStreamForPackage(skinPackage)
 
                 BufferedInputStream(inStream, STREAM_BUFFER_SIZE).use { bis ->
                     ZipInputStream(bis).use { zis ->
@@ -325,7 +379,7 @@ class SkinInstaller(
         val assetMap = assetsToWrite.associateBy { it.info.entryPath }
 
         // Try ZipFile first
-        val zipFile = tryOpenZipFile(skinPackage.sourceUri)
+        val zipFile = tryOpenZipFile(skinPackage.sourceUri, skinPackage.unwrappedFile)
 
         if (zipFile != null) {
             zipFile.use { zf ->
@@ -353,8 +407,7 @@ class SkinInstaller(
                 }
             }
         } else {
-            val inStream = context.contentResolver.openInputStream(skinPackage.sourceUri)
-                ?: throw IllegalStateException("Cannot open input stream for ${skinPackage.sourceUri}")
+            val inStream = openInputStreamForPackage(skinPackage)
 
             BufferedInputStream(inStream, STREAM_BUFFER_SIZE).use { bis ->
                 ZipInputStream(bis).use { zis ->
@@ -394,7 +447,20 @@ class SkinInstaller(
         return writtenCount
     }
 
-    private fun tryOpenZipFile(uri: Uri): ZipFile? {
+    private fun openInputStreamForPackage(pkg: SkinPackage): InputStream {
+        if (pkg.unwrappedFile != null && pkg.unwrappedFile.exists()) {
+            return java.io.FileInputStream(pkg.unwrappedFile)
+        }
+        val uri = pkg.sourceUri ?: throw IllegalStateException("Cannot open input stream for ${pkg.displayName}: no sourceUri")
+        return context.contentResolver.openInputStream(uri)
+            ?: throw IllegalStateException("Cannot open input stream for $uri")
+    }
+
+    private fun tryOpenZipFile(uri: Uri?, unwrappedFile: File? = null): ZipFile? {
+        if (unwrappedFile != null && unwrappedFile.exists() && unwrappedFile.canRead()) {
+            return try { ZipFile(unwrappedFile) } catch (_: Throwable) { null }
+        }
+        if (uri == null) return null
         return try {
             if (uri.scheme == "file" && uri.path != null) {
                 val file = File(uri.path!!)

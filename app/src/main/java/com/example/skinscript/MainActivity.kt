@@ -31,15 +31,18 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDownload
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.FolderZip
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storefront
@@ -74,7 +77,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -95,9 +97,11 @@ import com.example.skinscript.data.AssetCategory
 import com.example.skinscript.data.InstallSummary
 import com.example.skinscript.data.OverwriteMode
 import com.example.skinscript.data.SkinPackage
+import com.example.skinscript.data.formatByteSize
 import com.example.skinscript.data.updater.UpdateCheckState
 import com.example.skinscript.installer.OverwriteDecision
 import com.example.skinscript.shizuku.ShizukuState
+import com.example.skinscript.ui.ConflictPromptData
 import com.example.skinscript.ui.OverwritePromptData
 import com.example.skinscript.ui.SkinInstallerViewModel
 import com.example.skinscript.ui.marketplace.MarketplaceScreen
@@ -126,7 +130,7 @@ class MainActivity : ComponentActivity() {
                 SkinInstallerApp(
                     viewModel = viewModel,
                     marketplaceViewModel = marketplaceViewModel,
-                    onOpenZipPicker = { uri -> viewModel.loadZip(uri) }
+                    onOpenZipPicker = { uris -> viewModel.loadZips(uris) }
                 )
             }
         }
@@ -141,26 +145,33 @@ class MainActivity : ComponentActivity() {
     private fun handleIntent(intent: Intent?) {
         if (intent == null) return
         val action = intent.action
-        val type = intent.type
 
-        val uri: Uri? = when (action) {
-            Intent.ACTION_VIEW -> intent.data
+        val uris: List<Uri> = when (action) {
+            Intent.ACTION_VIEW -> intent.data?.let { listOf(it) } ?: emptyList()
             Intent.ACTION_SEND -> {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
                 } else {
                     @Suppress("DEPRECATION")
                     intent.getParcelableExtra(Intent.EXTRA_STREAM)
                 } ?: intent.clipData?.getItemAt(0)?.uri ?: intent.data
+                uri?.let { listOf(it) } ?: emptyList()
             }
             Intent.ACTION_SEND_MULTIPLE -> {
-                intent.clipData?.getItemAt(0)?.uri
+                val list = mutableListOf<Uri>()
+                val clipData = intent.clipData
+                if (clipData != null) {
+                    for (i in 0 until clipData.itemCount) {
+                        clipData.getItemAt(i).uri?.let { list.add(it) }
+                    }
+                }
+                list
             }
-            else -> intent.data
+            else -> intent.data?.let { listOf(it) } ?: emptyList()
         }
 
-        if (uri != null) {
-            viewModel.loadZip(uri)
+        if (uris.isNotEmpty()) {
+            viewModel.loadZips(uris)
         }
     }
 }
@@ -170,7 +181,7 @@ class MainActivity : ComponentActivity() {
 fun SkinInstallerApp(
     viewModel: SkinInstallerViewModel,
     marketplaceViewModel: MarketplaceViewModel,
-    onOpenZipPicker: (Uri) -> Unit
+    onOpenZipPicker: (List<Uri>) -> Unit
 ) {
     val context = LocalContext.current
     var selectedTab by remember { mutableStateOf(MainTab.INSTALLER) }
@@ -179,7 +190,8 @@ fun SkinInstallerApp(
     val destinationPath by viewModel.destinationPath.collectAsState()
     val overwriteMode by viewModel.overwriteMode.collectAsState()
     val isAnalyzing by viewModel.isAnalyzing.collectAsState()
-    val skinPackage by viewModel.skinPackage.collectAsState()
+    val loadedPackages by viewModel.loadedPackages.collectAsState()
+    val savedExtractedSkins by viewModel.savedExtractedSkins.collectAsState()
     val analysisError by viewModel.analysisError.collectAsState()
     val isInstalling by viewModel.isInstalling.collectAsState()
     val installProgress by viewModel.installProgress.collectAsState()
@@ -187,6 +199,7 @@ fun SkinInstallerApp(
     val testAccessResult by viewModel.testAccessResult.collectAsState()
     val isTestingAccess by viewModel.isTestingAccess.collectAsState()
     val overwritePrompt by viewModel.overwritePrompt.collectAsState()
+    val conflictPrompt by viewModel.conflictPrompt.collectAsState()
 
     // Auto updater state
     val updateCheckState by marketplaceViewModel.updateCheckState.collectAsState()
@@ -197,18 +210,20 @@ fun SkinInstallerApp(
     var showOverwriteDialog by remember { mutableStateOf(false) }
 
     val zipPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) {
-            try {
-                context.contentResolver.takePersistableUriPermission(
-                    uri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-            } catch (_: SecurityException) {
-                // Not all providers support persistable permissions
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (!uris.isNullOrEmpty()) {
+            uris.forEach { uri ->
+                try {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (_: SecurityException) {
+                    // Not all providers support persistable permissions
+                }
             }
-            onOpenZipPicker(uri)
+            onOpenZipPicker(uris)
         }
     }
 
@@ -304,7 +319,14 @@ fun SkinInstallerApp(
                             onRefresh = { viewModel.refreshShizuku() }
                         )
 
-                        // 2. Destination Settings Card
+                        // 2. Extracted Skins Backup & Re-extract Card
+                        SavedSkinsCard(
+                            savedSkinsCount = savedExtractedSkins.size,
+                            onReextractAll = { viewModel.reextractAllSkins() },
+                            onBrowseSkinZips = { viewModel.loadFromSkinZipsFolder() }
+                        )
+
+                        // 3. Destination Settings Card
                         DestinationSettingsCard(
                             destinationPath = destinationPath,
                             overwriteMode = overwriteMode,
@@ -316,12 +338,12 @@ fun SkinInstallerApp(
                             onTestAccess = { viewModel.testDestinationAccess() }
                         )
 
-                        // 3. ZIP Package Analysis Card
+                        // 4. ZIP Package(s) Analysis Card
                         ZipPackageCard(
-                            skinPackage = skinPackage,
+                            packages = loadedPackages,
                             isAnalyzing = isAnalyzing,
                             analysisError = analysisError,
-                            onOpenZip = {
+                            onOpenZips = {
                                 zipPickerLauncher.launch(
                                     arrayOf(
                                         "application/zip",
@@ -331,12 +353,14 @@ fun SkinInstallerApp(
                                     )
                                 )
                             },
+                            onRemovePackage = { pkg -> viewModel.removePackage(pkg) },
+                            onClearAll = { viewModel.clearLoadedPackages() },
                             onDismissError = { viewModel.dismissError() }
                         )
 
-                        // 4. Installation Action & Progress Card
+                        // 5. Installation Action & Progress Card
                         InstallActionCard(
-                            skinPackage = skinPackage,
+                            packages = loadedPackages,
                             isShizukuReady = shizukuState.isReady,
                             isInstalling = isInstalling,
                             installProgress = installProgress,
@@ -351,7 +375,7 @@ fun SkinInstallerApp(
                     MarketplaceScreen(
                         viewModel = marketplaceViewModel,
                         onInstallZip = { uri ->
-                            viewModel.loadZip(uri)
+                            viewModel.loadZips(listOf(uri))
                             selectedTab = MainTab.INSTALLER
                             Toast.makeText(context, "Skin package loaded! Ready to install.", Toast.LENGTH_SHORT).show()
                         },
@@ -403,6 +427,16 @@ fun SkinInstallerApp(
         )
     }
 
+    // Duplicate Skin Conflict Dialog
+    conflictPrompt?.let { promptData ->
+        SkinConflictDialog(
+            promptData = promptData,
+            onDecision = { chosen ->
+                viewModel.respondToConflictPrompt(chosen)
+            }
+        )
+    }
+
     // Overwrite Confirmation Prompt Dialog
     overwritePrompt?.let { promptData ->
         OverwritePromptDialog(
@@ -419,6 +453,74 @@ fun SkinInstallerApp(
             summary = summary,
             onDismiss = { viewModel.dismissSummary() }
         )
+    }
+}
+
+@Composable
+fun SavedSkinsCard(
+    savedSkinsCount: Int,
+    onReextractAll: () -> Unit,
+    onBrowseSkinZips: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Restore,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Extracted Skins Backup",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = if (savedSkinsCount > 0) "$savedSkinsCount skins registered for fast re-extraction" else "Stored in skinzips for instant restoration",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onBrowseSkinZips,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(imageVector = Icons.Default.Folder, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("SkinZips Folder")
+                }
+
+                Button(
+                    onClick = onReextractAll,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(imageVector = Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(if (savedSkinsCount > 0) "Re-extract All ($savedSkinsCount)" else "Re-extract All")
+                }
+            }
+        }
     }
 }
 
@@ -630,7 +732,7 @@ fun DestinationSettingsCard(
                 Text(
                     text = result,
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (result.startsWith("✓")) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error,
+                    color = if (result.startsWith("Destination is accessible")) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(top = 2.dp)
                 )
             }
@@ -640,10 +742,12 @@ fun DestinationSettingsCard(
 
 @Composable
 fun ZipPackageCard(
-    skinPackage: SkinPackage?,
+    packages: List<SkinPackage>,
     isAnalyzing: Boolean,
     analysisError: String?,
-    onOpenZip: () -> Unit,
+    onOpenZips: () -> Unit,
+    onRemovePackage: (SkinPackage) -> Unit,
+    onClearAll: () -> Unit,
     onDismissError: () -> Unit
 ) {
     Card(
@@ -663,26 +767,33 @@ fun ZipPackageCard(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        imageVector = Icons.Default.FolderZip,
+                        imageVector = if (packages.size > 1) Icons.Default.Layers else Icons.Default.FolderZip,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Skin Package",
+                        text = if (packages.size > 1) "Skin Packages (${packages.size})" else "Skin Package",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
                 }
 
-                FilledTonalButton(onClick = onOpenZip) {
-                    Icon(
-                        imageVector = Icons.Default.FolderOpen,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(if (skinPackage == null) "Open ZIP" else "Change ZIP")
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (packages.size > 1) {
+                        TextButton(onClick = onClearAll) {
+                            Text("Clear")
+                        }
+                    }
+                    FilledTonalButton(onClick = onOpenZips) {
+                        Icon(
+                            imageVector = Icons.Default.FolderOpen,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(if (packages.isEmpty()) "Open ZIP" else "Add ZIPs")
+                    }
                 }
             }
 
@@ -698,7 +809,72 @@ fun ZipPackageCard(
                     Spacer(modifier = Modifier.width(12.dp))
                     Text("Analyzing ZIP archive entries...")
                 }
-            } else if (skinPackage != null) {
+            } else if (packages.size > 1) {
+                // Multi-package view
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Total files: ${packages.sumOf { it.totalFiles }}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = formatByteSize(packages.sumOf { it.totalSize }),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        packages.forEach { pkg ->
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = pkg.displayName,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = "${pkg.totalFiles} files (${pkg.formattedTotalSize})",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = { onRemovePackage(pkg) },
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Close,
+                                            contentDescription = "Remove",
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if (packages.size == 1) {
+                // Single package view
+                val skinPackage = packages.first()
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
                         text = skinPackage.displayName,
@@ -771,13 +947,13 @@ fun ZipPackageCard(
                             modifier = Modifier.size(36.dp)
                         )
                         Text(
-                            text = "No package selected",
+                            text = "No packages selected",
                             style = MaterialTheme.typography.bodyLarge,
                             fontWeight = FontWeight.Medium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Text(
-                            text = "Use 'Open with' from your download manager or click 'Open ZIP' above.",
+                            text = "Select one or multiple ZIP files to begin batch extraction.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
                             textAlign = TextAlign.Center
@@ -861,13 +1037,14 @@ fun CategoryBadge(
 
 @Composable
 fun InstallActionCard(
-    skinPackage: SkinPackage?,
+    packages: List<SkinPackage>,
     isShizukuReady: Boolean,
     isInstalling: Boolean,
     installProgress: com.example.skinscript.data.InstallProgress,
     onInstall: () -> Unit
 ) {
-    val canInstall = skinPackage != null && skinPackage.hasValidAssets && isShizukuReady && !isInstalling
+    val totalFiles = packages.sumOf { it.totalFiles }
+    val canInstall = packages.isNotEmpty() && totalFiles > 0 && isShizukuReady && !isInstalling
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -933,7 +1110,7 @@ fun InstallActionCard(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Install Skin Assets",
+                        text = if (packages.size > 1) "Install All (${packages.size}) Skins" else "Install Skin Assets",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
@@ -941,13 +1118,13 @@ fun InstallActionCard(
 
                 if (!isShizukuReady) {
                     Text(
-                        text = "⚠ Shizuku service must be running and authorized to perform installation.",
+                        text = "Shizuku service must be running and authorized to perform installation.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error
                     )
-                } else if (skinPackage == null) {
+                } else if (packages.isEmpty()) {
                     Text(
-                        text = "Select or share a skin ZIP file to begin.",
+                        text = "Select or share skin ZIP files to begin.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -955,6 +1132,91 @@ fun InstallActionCard(
             }
         }
     }
+}
+
+@Composable
+fun SkinConflictDialog(
+    promptData: ConflictPromptData,
+    onDecision: (SkinPackage?) -> Unit
+) {
+    var selectedPackage by remember { mutableStateOf<SkinPackage?>(promptData.conflictGroup.packages.firstOrNull()) }
+
+    AlertDialog(
+        onDismissRequest = { onDecision(null) },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Duplicate Skin Conflict")
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "Multiple skins modify the same hero assets (${promptData.conflictGroup.title}). Choose which variant you want to extract:",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    promptData.conflictGroup.packages.forEach { pkg ->
+                        Surface(
+                            onClick = { selectedPackage = pkg },
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (selectedPackage == pkg) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else Color.Transparent,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(8.dp)
+                            ) {
+                                RadioButton(
+                                    selected = selectedPackage == pkg,
+                                    onClick = { selectedPackage = pkg }
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        text = pkg.displayName,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "${pkg.totalFiles} files (${pkg.formattedTotalSize})",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onDecision(selectedPackage) },
+                enabled = selectedPackage != null
+            ) {
+                Text("Extract Selected")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = { onDecision(null) }) {
+                Text("Skip This Hero")
+            }
+        }
+    )
 }
 
 @Composable
@@ -1143,11 +1405,11 @@ fun InstallSummaryDialog(
                         modifier = Modifier.padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        Text("• Total files processed: ${summary.total}")
-                        Text("• Installed successfully: ${summary.success}", color = Color(0xFF2E7D32), fontWeight = FontWeight.SemiBold)
-                        Text("• Skipped (existed): ${summary.skipped}", color = Color(0xFFE65100))
-                        Text("• Failed: ${summary.failed}", color = if (summary.failed > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("• Time elapsed: ${summary.durationMs / 1000.0}s")
+                        Text("Total files processed: ${summary.total}")
+                        Text("Installed successfully: ${summary.success}", color = Color(0xFF2E7D32), fontWeight = FontWeight.SemiBold)
+                        Text("Skipped (existed): ${summary.skipped}", color = Color(0xFFE65100))
+                        Text("Failed: ${summary.failed}", color = if (summary.failed > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Time elapsed: ${summary.durationMs / 1000.0}s")
                     }
                 }
 
@@ -1166,7 +1428,7 @@ fun InstallSummaryDialog(
                     ) {
                         summary.errors.forEach { err ->
                             Text(
-                                text = "• $err",
+                                text = err,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.error
                             )

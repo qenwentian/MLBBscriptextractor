@@ -24,12 +24,13 @@ data class ZipEntryInfo(
 }
 
 data class SkinPackage(
-    val sourceUri: Uri,
+    val sourceUri: Uri? = null,
     val displayName: String,
     val artFiles: List<ZipEntryInfo> = emptyList(),
     val audioFiles: List<ZipEntryInfo> = emptyList(),
     val uiFiles: List<ZipEntryInfo> = emptyList(),
-    val otherFiles: List<ZipEntryInfo> = emptyList()
+    val otherFiles: List<ZipEntryInfo> = emptyList(),
+    val unwrappedFile: java.io.File? = null
 ) {
     val allAssetFiles: List<ZipEntryInfo>
         get() = artFiles + audioFiles + uiFiles
@@ -45,6 +46,25 @@ data class SkinPackage(
 
     val hasValidAssets: Boolean
         get() = artFiles.isNotEmpty() || audioFiles.isNotEmpty() || uiFiles.isNotEmpty() || otherFiles.isNotEmpty()
+
+    val detectedHero: String?
+        get() {
+            val lower = displayName.lowercase()
+            val heroes = listOf(
+                "martis", "chou", "selena", "gusion", "ling", "fanny", "alucard", "lancelot",
+                "hayabusa", "claude", "granger", "beatrix", "lesley", "miya", "layla", "moskov",
+                "karrie", "wanwan", "paquito", "yu zhong", "yin", "freya", "zilong", "alpha",
+                "roger", "aldous", "badang", "guinevere", "kagura", "kadita", "lunox", "harith",
+                "cecilion", "xavier", "julian", "nolan", "cici", "suyou", "zhuxin", "lukas",
+                "rafaela", "popol and kupa", "terizla", "ruby", "saber"
+            )
+            for (h in heroes) {
+                if (lower.contains(h)) {
+                    return h.split(" ").joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
+                }
+            }
+            return null
+        }
 }
 
 enum class OverwriteMode(val title: String, val description: String) {

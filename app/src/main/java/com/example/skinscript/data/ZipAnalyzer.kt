@@ -12,6 +12,7 @@ import java.util.zip.ZipInputStream
 
 import android.os.ParcelFileDescriptor
 import java.io.File
+import java.io.FileOutputStream
 import java.util.zip.ZipFile
 
 class ZipAnalyzer(private val context: Context) {
@@ -38,6 +39,7 @@ class ZipAnalyzer(private val context: Context) {
             val artList = mutableListOf<ZipEntryInfo>()
             val audioList = mutableListOf<ZipEntryInfo>()
             val uiList = mutableListOf<ZipEntryInfo>()
+            var unwrappedTempFile: File? = null
 
             BufferedInputStream(inputStream, BUFFER_SIZE).use { bis ->
                 ZipInputStream(bis).use { zis ->
@@ -49,6 +51,9 @@ class ZipAnalyzer(private val context: Context) {
                             val isDirectory = entry.isDirectory || normalizedPath.endsWith("/")
 
                             if (!isDirectory) {
+                                if (entryName.endsWith(".zip", ignoreCase = true) && unwrappedTempFile == null) {
+                                    unwrappedTempFile = unwrapNestedZipFromStream(zis, entryName)
+                                }
                                 val entryInfo = categorizeEntry(entry, normalizedPath)
                                 if (entryInfo != null) {
                                     when (entryInfo.category) {
@@ -65,6 +70,18 @@ class ZipAnalyzer(private val context: Context) {
                         zis.closeEntry()
                         entry = zis.nextEntry
                     }
+                }
+            }
+
+            if (artList.isEmpty() && audioList.isEmpty() && uiList.isEmpty() && unwrappedTempFile != null) {
+                try {
+                    val innerZip = ZipFile(unwrappedTempFile)
+                    val innerPackage = parseZipFileEntries(innerZip, uri, displayName)
+                    if (innerPackage.hasValidAssets) {
+                        return@runCatching innerPackage.copy(unwrappedFile = unwrappedTempFile)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to parse streaming unwrapped zip: ${e.message}")
                 }
             }
 
@@ -105,11 +122,12 @@ class ZipAnalyzer(private val context: Context) {
     }
 
     private fun parseZipFileEntries(zipFile: ZipFile, uri: Uri, displayName: String): SkinPackage {
-        zipFile.use { zf ->
-            val artList = mutableListOf<ZipEntryInfo>()
-            val audioList = mutableListOf<ZipEntryInfo>()
-            val uiList = mutableListOf<ZipEntryInfo>()
+        val nestedZipEntries = mutableListOf<String>()
+        val artList = mutableListOf<ZipEntryInfo>()
+        val audioList = mutableListOf<ZipEntryInfo>()
+        val uiList = mutableListOf<ZipEntryInfo>()
 
+        zipFile.use { zf ->
             val entries = zf.entries()
             while (entries.hasMoreElements()) {
                 val entry = entries.nextElement()
@@ -119,6 +137,9 @@ class ZipAnalyzer(private val context: Context) {
                     val isDirectory = entry.isDirectory || normalizedPath.endsWith("/")
 
                     if (!isDirectory) {
+                        if (entryName.endsWith(".zip", ignoreCase = true)) {
+                            nestedZipEntries.add(entryName)
+                        }
                         val entryInfo = categorizeEntry(entry, normalizedPath)
                         if (entryInfo != null) {
                             when (entryInfo.category) {
@@ -134,6 +155,24 @@ class ZipAnalyzer(private val context: Context) {
                 }
             }
 
+            // If no valid assets were detected, check if archive contains an inner ZIP
+            if (artList.isEmpty() && audioList.isEmpty() && uiList.isEmpty() && nestedZipEntries.isNotEmpty()) {
+                for (nestedName in nestedZipEntries) {
+                    val unwrapped = unwrapNestedZip(zf, nestedName)
+                    if (unwrapped != null) {
+                        try {
+                            val innerZip = ZipFile(unwrapped)
+                            val innerPackage = parseZipFileEntries(innerZip, uri, displayName)
+                            if (innerPackage.hasValidAssets) {
+                                return innerPackage.copy(unwrappedFile = unwrapped)
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to parse unwrapped nested zip ($nestedName): ${e.message}")
+                        }
+                    }
+                }
+            }
+
             return SkinPackage(
                 sourceUri = uri,
                 displayName = displayName,
@@ -142,6 +181,39 @@ class ZipAnalyzer(private val context: Context) {
                 uiFiles = uiList,
                 otherFiles = emptyList()
             )
+        }
+    }
+
+    private fun unwrapNestedZip(zipFile: ZipFile, entryName: String): File? {
+        return try {
+            val entry = zipFile.getEntry(entryName) ?: return null
+            val unwrapDir = File(context.cacheDir, "unwrapped_skins")
+            if (!unwrapDir.exists()) unwrapDir.mkdirs()
+            val tempFile = File(unwrapDir, File(entryName).name)
+            zipFile.getInputStream(entry).use { input ->
+                FileOutputStream(tempFile).use { output ->
+                    input.copyTo(output)
+                }
+            }
+            tempFile
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to unwrap nested zip: $entryName", e)
+            null
+        }
+    }
+
+    private fun unwrapNestedZipFromStream(zis: ZipInputStream, entryName: String): File? {
+        return try {
+            val unwrapDir = File(context.cacheDir, "unwrapped_skins")
+            if (!unwrapDir.exists()) unwrapDir.mkdirs()
+            val tempFile = File(unwrapDir, File(entryName).name)
+            FileOutputStream(tempFile).use { output ->
+                zis.copyTo(output)
+            }
+            tempFile
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to unwrap nested zip from stream: $entryName", e)
+            null
         }
     }
 

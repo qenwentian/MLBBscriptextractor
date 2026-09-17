@@ -583,7 +583,7 @@ fun MarketplaceItemCard(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = "⚠ ${status.errorMessage}",
+                            text = status.errorMessage,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error,
                             modifier = Modifier.weight(1f),
