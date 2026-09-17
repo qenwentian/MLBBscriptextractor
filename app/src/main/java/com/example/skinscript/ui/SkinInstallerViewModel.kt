@@ -29,6 +29,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -126,6 +127,45 @@ class SkinInstallerViewModel(application: Application) : AndroidViewModel(applic
 
     private val _skinzipsList = MutableStateFlow<List<File>>(emptyList())
     val skinzipsList: StateFlow<List<File>> = _skinzipsList.asStateFlow()
+
+    val reextractSkinsCount: StateFlow<Int> = combine(skinzipsList, savedExtractedSkins) { zips, saved ->
+        val seenPaths = mutableSetOf<String>()
+        var count = 0
+        for (zip in zips) {
+            val path = try { zip.canonicalPath.lowercase() } catch (_: Exception) { zip.absolutePath.lowercase() }
+            if (seenPaths.add(path)) {
+                count++
+            }
+        }
+        for (record in saved) {
+            val file = record.filePath?.let { File(it) }
+            if (file != null && file.exists()) {
+                val path = try { file.canonicalPath.lowercase() } catch (_: Exception) { file.absolutePath.lowercase() }
+                if (seenPaths.add(path)) {
+                    count++
+                }
+            } else {
+                val inDirZip = File(skinStorageManager.getSkinZipsDirectory(), "${record.displayName}.zip")
+                val inDirExact = File(skinStorageManager.getSkinZipsDirectory(), record.displayName)
+                val target = if (inDirZip.exists()) inDirZip else if (inDirExact.exists()) inDirExact else null
+                if (target != null) {
+                    val path = try { target.canonicalPath.lowercase() } catch (_: Exception) { target.absolutePath.lowercase() }
+                    if (seenPaths.add(path)) {
+                        count++
+                    }
+                } else if (record.fileUriString.isNotBlank()) {
+                    if (seenPaths.add(record.fileUriString.lowercase())) {
+                        count++
+                    }
+                }
+            }
+        }
+        count
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = 0
+    )
 
     init {
         shizukuManager.init()
@@ -230,42 +270,52 @@ class SkinInstallerViewModel(application: Application) : AndroidViewModel(applic
         viewModelScope.launch {
             _isAnalyzing.value = true
             _analysisError.value = null
-            val saved = savedExtractedSkins.value
-            if (saved.isEmpty()) {
-                val zips = skinStorageManager.listSkinZips()
-                if (zips.isEmpty()) {
-                    _analysisError.value = "No saved extracted skins or skinzips found to re-extract."
-                    _isAnalyzing.value = false
-                    return@launch
-                }
-                loadZips(zips.map { skinStorageManager.getFileUri(it) })
-                return@launch
-            }
+
+            val zips = skinStorageManager.listSkinZips()
+            _skinzipsList.value = zips
 
             val urisToLoad = mutableListOf<Uri>()
+            val seenPaths = mutableSetOf<String>()
+
+            // 1. First add all ZIPs present in skinzips directory
+            for (zip in zips) {
+                val path = try { zip.canonicalPath.lowercase() } catch (_: Exception) { zip.absolutePath.lowercase() }
+                if (seenPaths.add(path)) {
+                    urisToLoad.add(skinStorageManager.getFileUri(zip))
+                }
+            }
+
+            // 2. Then check saved extracted skins records for any external files
+            val saved = savedExtractedSkins.value
             for (record in saved) {
                 val file = record.filePath?.let { File(it) }
                 if (file != null && file.exists()) {
-                    urisToLoad.add(skinStorageManager.getFileUri(file))
+                    val path = try { file.canonicalPath.lowercase() } catch (_: Exception) { file.absolutePath.lowercase() }
+                    if (seenPaths.add(path)) {
+                        urisToLoad.add(skinStorageManager.getFileUri(file))
+                    }
                 } else {
                     val inDirZip = File(skinStorageManager.getSkinZipsDirectory(), "${record.displayName}.zip")
-                    if (inDirZip.exists()) {
-                        urisToLoad.add(skinStorageManager.getFileUri(inDirZip))
-                    } else {
-                        val inDirExact = File(skinStorageManager.getSkinZipsDirectory(), record.displayName)
-                        if (inDirExact.exists()) {
-                            urisToLoad.add(skinStorageManager.getFileUri(inDirExact))
-                        } else {
-                            try {
-                                urisToLoad.add(Uri.parse(record.fileUriString))
-                            } catch (_: Exception) {}
+                    val inDirExact = File(skinStorageManager.getSkinZipsDirectory(), record.displayName)
+                    val target = if (inDirZip.exists()) inDirZip else if (inDirExact.exists()) inDirExact else null
+                    if (target != null) {
+                        val path = try { target.canonicalPath.lowercase() } catch (_: Exception) { target.absolutePath.lowercase() }
+                        if (seenPaths.add(path)) {
+                            urisToLoad.add(skinStorageManager.getFileUri(target))
                         }
+                    } else if (record.fileUriString.isNotBlank()) {
+                        try {
+                            val uri = Uri.parse(record.fileUriString)
+                            if (!urisToLoad.contains(uri)) {
+                                urisToLoad.add(uri)
+                            }
+                        } catch (_: Exception) {}
                     }
                 }
             }
 
             if (urisToLoad.isEmpty()) {
-                _analysisError.value = "Could not locate the saved skin zip files in storage."
+                _analysisError.value = "No skin archives found in skinzips folder or saved records to re-extract."
                 _isAnalyzing.value = false
                 return@launch
             }

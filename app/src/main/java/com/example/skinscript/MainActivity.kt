@@ -144,6 +144,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        viewModel.refreshSkinZips()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -224,7 +229,14 @@ fun SkinInstallerApp(
     }
 
     val skinzipsList by viewModel.skinzipsList.collectAsState()
+    val reextractSkinsCount by viewModel.reextractSkinsCount.collectAsState()
     var showSkinZipsFolderDialog by remember { mutableStateOf(false) }
+
+    LaunchedEffect(selectedTab) {
+        if (selectedTab == MainTab.INSTALLER) {
+            viewModel.refreshSkinZips()
+        }
+    }
 
     var showDestinationDialog by remember { mutableStateOf(false) }
     var showOverwriteDialog by remember { mutableStateOf(false) }
@@ -305,6 +317,7 @@ fun SkinInstallerApp(
                         onClick = {
                             if (selectedTab == MainTab.INSTALLER) {
                                 viewModel.refreshShizuku()
+                                viewModel.refreshSkinZips()
                             } else {
                                 marketplaceViewModel.loadInitialPage()
                             }
@@ -361,6 +374,7 @@ fun SkinInstallerApp(
 
                         // 2. Extracted Skins Backup & Re-extract Card
                         SavedSkinsCard(
+                            reextractCount = reextractSkinsCount,
                             savedSkinsCount = savedExtractedSkins.size,
                             skinZipsCount = skinzipsList.size,
                             onReextractAll = { viewModel.reextractAllSkins() },
@@ -545,6 +559,7 @@ fun SkinInstallerApp(
 
 @Composable
 fun SavedSkinsCard(
+    reextractCount: Int,
     savedSkinsCount: Int,
     skinZipsCount: Int,
     onReextractAll: () -> Unit,
@@ -580,10 +595,14 @@ fun SavedSkinsCard(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = if (savedSkinsCount > 0) {
-                            "$savedSkinsCount skins registered • $skinZipsCount in skinzips"
-                        } else if (skinZipsCount > 0) {
-                            "$skinZipsCount zip(s) found in skinzips folder"
+                        text = if (reextractCount > 0) {
+                            if (skinZipsCount > 0 && savedSkinsCount > 0) {
+                                "$reextractCount skin(s) ready to re-extract • $skinZipsCount in skinzips"
+                            } else if (skinZipsCount > 0) {
+                                "$skinZipsCount zip(s) found in skinzips folder"
+                            } else {
+                                "$savedSkinsCount skin(s) registered for re-extraction"
+                            }
                         } else {
                             "Stored in skinzips for instant restoration"
                         },
@@ -618,11 +637,12 @@ fun SavedSkinsCard(
 
             Button(
                 onClick = onReextractAll,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
+                enabled = reextractCount > 0
             ) {
                 Icon(imageVector = Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(6.dp))
-                Text(if (savedSkinsCount > 0) "Re-extract All ($savedSkinsCount)" else "Re-extract All")
+                Text(if (reextractCount > 0) "Re-extract All ($reextractCount)" else "Re-extract All")
             }
         }
     }
